@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 from unittest.mock import patch
 
@@ -786,14 +787,102 @@ class TestProvidersFile:
         monkeypatch.setenv("GEMINI_KEY_1", "k1")
         monkeypatch.setenv("GEMINI_KEY_2", "k2")
         monkeypatch.setenv("GROQ_KEY", "k3")
-        monkeypatch.setenv("OPENROUTER_KEY", "k4")
 
         path = Path(__file__).resolve().parent.parent / "providers.json"
         router = build_router_from_json("", providers_file=str(path))
-        assert len(router.providers) == 4
+        assert len(router.providers) == 3
         names = [p.name for p in router.providers]
-        assert names == ["gemini-flash-primary", "gemini-flash-account-2", "groq-gpt-oss", "openrouter-free"]
+        assert names == ["gemini-flash-primary", "gemini-flash-account-2", "groq-gpt-oss"]
         assert router.providers[0].model_list == ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+
+
+class TestCooldownWaiting:
+    """503 «high demand» и 429 — временные лимиты. Нельзя сдаваться сразу."""
+
+    def test_waits_and_retries_instead_of_giving_up(self) -> None:
+        p1, p2 = make_provider("gemini", 5), make_provider("groq", 5)
+        router = LLMRouter([p1, p2])
+        # оба упали по разу, затем второй отвечает успешно
+        fake = FakeCompletion([make_overload_error(), make_overload_error(), ok_results, ok_results])
+
+        slept: list[float] = []
+        real_sleep = time.sleep
+
+        def fake_sleep(sec: float) -> None:
+            slept.append(sec)
+            router.states["gemini"].cooldown_until = 0.0
+            router.states["groq"].cooldown_until = 0.0
+            real_sleep(0)
+
+        with patch.object(router, "_raw_completion", side_effect=_raw_wrapper(router, fake)):
+            with patch("llm.router.time.sleep", side_effect=fake_sleep):
+                results = router.score("sys", simple_prompt, build_payload(4))
+
+        assert len(results) == 4
+        assert slept, "роутер должен был дождаться выхода из кулдауна"
+
+    def test_auth_disabled_does_not_wait(self) -> None:
+        """Ключ выключен по 401 — ждать бессмысленно, выходим сразу."""
+        p = make_provider("only", 5)
+        router = LLMRouter([p])
+        fake = FakeCompletion([make_auth_error()])
+
+        with patch.object(router, "_raw_completion", side_effect=_raw_wrapper(router, fake)):
+            with patch("llm.router.time.sleep") as mock_sleep:
+                with pytest.raises(AllProvidersFailed):
+                    router.score("sys", simple_prompt, build_payload(3))
+
+        mock_sleep.assert_not_called()
+
+    def test_gives_up_when_cooldown_too_long(self) -> None:
+        """Кулдаун больше лимита ожидания — не висим, сдаёмся."""
+        p = make_provider("only", 5)
+        router = LLMRouter([p])
+        router.states["only"].cooldown_until = time.monotonic() + 9999
+
+        assert router._next_provider_waiting() is None
+
+    def test_rate_limit_shrinks_batch(self) -> None:
+        """429 → батч ужимается, чтобы не пробивать TPM."""
+        p = make_provider("groq", 10)
+        router = LLMRouter([p])
+        fake = FakeCompletion([make_rate_limit_error()] + [ok_results] * 20)
+
+        def fake_sleep(sec: float) -> None:
+            # «проспали» — кулдаун истёк
+            router.states["groq"].cooldown_until = 0.0
+
+        with patch.object(router, "_raw_completion", side_effect=_raw_wrapper(router, fake)):
+            with patch("llm.router.time.sleep", side_effect=fake_sleep):
+                router.score("sys", simple_prompt, build_payload(10))
+
+        assert router.states["groq"].dynamic_cap == 5
+
+    def test_retry_after_header_is_respected(self) -> None:
+        """Retry-After из ответа важнее нашего дефолта."""
+        err = openai.RateLimitError(
+            "rate limit",
+            response=httpx.Response(
+                429, request=_req(), headers={"retry-after": "17"}
+            ),
+            body={"error": {"message": "rate"}},
+        )
+        router = LLMRouter([make_provider("p", 5)])
+        assert router._retry_after(err, 60.0) == 17.0
+
+    def test_retry_after_seconds_format(self) -> None:
+        err = openai.RateLimitError(
+            "rate limit",
+            response=httpx.Response(429, request=_req(), headers={"retry-after": "1m30s"}),
+            body={"error": {"message": "rate"}},
+        )
+        router = LLMRouter([make_provider("p", 5)])
+        assert router._retry_after(err, 60.0) == 90.0
+
+    def test_retry_after_missing_falls_back_to_default(self) -> None:
+        router = LLMRouter([make_provider("p", 5)])
+        assert router._retry_after(None, 60.0) == 60.0
+        assert router._retry_after(ValueError("x"), 60.0) == 60.0
 
 
 class TestStats:

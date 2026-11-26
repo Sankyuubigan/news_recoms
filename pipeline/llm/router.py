@@ -541,7 +541,11 @@ class LLMRouter:
     """Multi-provider LLM router: failover, cooldown, adaptive batch splitting."""
 
     COOLDOWN_RATE = 60.0
-    COOLDOWN_OVERLOAD = 20.0
+    COOLDOWN_OVERLOAD = 30.0
+    # Сколько максимум ждать, пока все провайдеры выйдут из кулдауна, за один раз.
+    MAX_COOLDOWN_WAIT = 120.0
+    # Сколько всего секунд прогон может провести в ожидании чужих лимитов.
+    MAX_TOTAL_WAIT = 600.0
     # Сколько живёт «ключ выключен» в config.json. Раз в сутки перепроверяем:
     # ключ могли починить/оплатить, а вечная блокировка — тоже плохо.
     DISABLED_TTL_HOURS = 24.0
@@ -566,6 +570,7 @@ class LLMRouter:
 
         self.states: dict[str, ProviderState] = {p.name: ProviderState() for p in self.providers}
         self._clients: dict[str, OpenAI] = {}
+        self._waited_total = 0.0
         self._restore_disabled(disabled or {})
 
     # ------------------------------------------------------- persisted state
@@ -660,7 +665,7 @@ class LLMRouter:
             if rounds > max_rounds:
                 raise AllProvidersFailed(f"max rounds exceeded, {len(queue)} items left")
 
-            provider = self._next_provider()
+            provider = self._next_provider_waiting()
             if provider is None:
                 raise AllProvidersFailed(f"{len(queue)} items left unprocessed")
 
@@ -680,12 +685,22 @@ class LLMRouter:
             except Exception as e:  # noqa: BLE001 — любая ошибка провайдера = failover
                 kind = _classify_error(e)
                 st.err += 1
-                self._handle_failure(provider, kind)
+                self._handle_failure(provider, kind, e)
                 log.warning("provider %s failed (%s): %s", provider.name, kind, str(e)[:200])
 
                 if kind == "context" and chunk_size > 1:
                     # ужимаем батч этого провайдера вдвое и пробуем снова
                     st.dynamic_cap = max(1, chunk_size // 2)
+                elif kind == "rate" and chunk_size > 1:
+                    # 429 — упёрлись в лимит. Если это TPM (токены в минуту),
+                    # виноват не размер запроса как таковой, а их сумма. Но уменьшить
+                    # батч всё равно полезно: меньше токенов за раз — плавнее график.
+                    st.dynamic_cap = max(1, min(st.dynamic_cap or chunk_size, chunk_size // 2))
+                    log.info(
+                        "provider %s: лимит, ужимаю батч до %d постов",
+                        provider.name,
+                        st.dynamic_cap,
+                    )
                 # очередь не двигается — следующий живой провайдер возьмёт её (уже с его max_batch_size)
                 continue
 
@@ -699,7 +714,7 @@ class LLMRouter:
     ) -> Any:
         """Одиночный JSON-вызов (learner и прочие) с тем же failover."""
         while True:
-            provider = self._next_provider()
+            provider = self._next_provider_waiting()
             if provider is None:
                 raise AllProvidersFailed("no providers available for single call")
             try:
@@ -710,7 +725,7 @@ class LLMRouter:
             except Exception as e:  # noqa: BLE001
                 kind = _classify_error(e)
                 self.states[provider.name].err += 1
-                self._handle_failure(provider, kind)
+                self._handle_failure(provider, kind, e)
                 log.warning("provider %s single call failed (%s): %s", provider.name, kind, str(e)[:200])
 
     # --------------------------------------------------------------- internal
@@ -723,13 +738,57 @@ class LLMRouter:
                 return p
         return None
 
-    def _handle_failure(self, provider: Provider, kind: str) -> None:
+    def _next_provider_waiting(self) -> Provider | None:
+        """Как _next_provider, но при общем кулдауне ждёт, пока кто-нибудь оживёт.
+
+        503 «high demand» и 429 TPM — это НЕ отказ ключа, а временный лимит.
+        Сдаваться сразу и отправлять посты в pending_ai неправильно: через
+        полминуты провайдер снова работает. Ждём, но с жёстким потолком, чтобы
+        прогон не висел бесконечно.
+        """
+        provider = self._next_provider()
+        if provider is not None:
+            return provider
+
+        # Все выключены по auth — ждать бессмысленно.
+        if all(st.disabled for st in self.states.values()):
+            return None
+
+        now = time.monotonic()
+        earliest = min(
+            (st.cooldown_until for st in self.states.values() if not st.disabled),
+            default=0.0,
+        )
+        delay = earliest - now
+        if delay <= 0:
+            return self._next_provider()
+
+        if delay > self.MAX_COOLDOWN_WAIT or self._waited_total + delay > self.MAX_TOTAL_WAIT:
+            log.error(
+                "все провайдеры в кулдауне, ближайший через %.0fс — это больше лимита "
+                "ожидания (уже ждали %.0fс), сдаюсь",
+                delay,
+                self._waited_total,
+            )
+            return None
+
+        log.warning(
+            "все провайдеры в кулдауне — жду %.0fс до следующей попытки "
+            "(всего за прогон ждали %.0fс)",
+            delay,
+            self._waited_total,
+        )
+        time.sleep(delay)
+        self._waited_total += delay
+        return self._next_provider()
+
+    def _handle_failure(self, provider: Provider, kind: str, exc: Exception | None = None) -> None:
         st = self.states[provider.name]
         if kind == "auth":
             st.disabled = True
             st.disabled_reason = "authentication failed (401/403): ключ недействителен, отозван или без доступа к модели"
         elif kind == "rate":
-            st.cooldown_until = time.monotonic() + self.COOLDOWN_RATE
+            st.cooldown_until = time.monotonic() + self._retry_after(exc, self.COOLDOWN_RATE)
         elif kind == "overload":
             st.cooldown_until = time.monotonic() + self.COOLDOWN_OVERLOAD
         elif kind == "context":
@@ -764,6 +823,32 @@ class LLMRouter:
             st.cooldown_until = time.monotonic() + 5.0
         else:
             st.cooldown_until = time.monotonic() + 10.0
+
+    def _retry_after(self, exc: Exception | None, default: float) -> float:
+        """Сколько ждать по кулдауну: из Retry-After ответа или дефолт.
+
+        Groq и Gemini в 429 присылают точное время ожидания — глупо его
+        игнорировать и ждать наугад.
+        """
+        if exc is None:
+            return default
+        headers = getattr(getattr(exc, "response", None), "headers", None)
+        if not headers:
+            return default
+        raw = headers.get("retry-after") or headers.get("x-ratelimit-reset-requests")
+        if not raw:
+            return default
+        text = str(raw).strip()
+        try:
+            return max(1.0, min(float(text), self.MAX_COOLDOWN_WAIT))
+        except ValueError:
+            pass
+        # Формат вида "1m30s" / "30s" / "1.5s"
+        match = re.fullmatch(r"(?:(\d+)m)?(?:([\d.]+)s)?", text)
+        if match and (match.group(1) or match.group(2)):
+            seconds = int(match.group(1) or 0) * 60 + float(match.group(2) or 0)
+            return max(1.0, min(seconds, self.MAX_COOLDOWN_WAIT))
+        return default
 
     def _current_model(self, provider: Provider) -> str:
         models = provider.model_list
