@@ -285,3 +285,70 @@ def test_update_source_status_writes_last_error(store: Storage) -> None:
     ident = store.config["sources"][0]["identifier"]
     store.update_source_status([{"identifier": ident, "last_error": "timeout", "last_fetched_at": None}])
     assert store.config["sources"][0]["last_error"] == "timeout"
+
+
+# ------------------------------------------- disabled LLM providers (config.json)
+
+
+def test_disabled_providers_roundtrip(store: Storage, tmp_path: Path) -> None:
+    """Выключенный ключ должен переживать прогон — иначе 401 тратит запрос каждый раз."""
+    entries = [
+        {
+            "key": "gemini|abc123def456",
+            "name": "gemini",
+            "key_fp": "abc123def456",
+            "model": "gemini-2.5-flash",
+            "reason": "authentication failed (401/403)",
+            "at": _iso(0),
+            "until": _iso(-1),
+        }
+    ]
+    store.set_disabled_providers(entries)
+    store.save()
+
+    reloaded = Storage(tmp_path)
+    snap = reloaded.get_disabled_providers()
+    assert list(snap) == ["gemini|abc123def456"]
+    assert snap["gemini|abc123def456"]["reason"].startswith("authentication failed")
+
+
+def test_disabled_providers_stored_as_json_string(store: Storage) -> None:
+    """settings на фронте типизирован как Record<string,string> — ломать тип нельзя."""
+    store.set_disabled_providers([{"key": "a|b", "name": "a", "key_fp": "b", "until": _iso(-1)}])
+    raw = store.config["settings"][Storage.DISABLED_SETTING_KEY]
+    assert isinstance(raw, str)
+    assert json.loads(raw)[0]["name"] == "a"
+
+
+def test_disabled_providers_cleared_when_empty(store: Storage) -> None:
+    store.set_disabled_providers([{"key": "a|b", "name": "a", "key_fp": "b", "until": _iso(-1)}])
+    store.set_disabled_providers([])
+    assert store.get_disabled_providers() == {}
+
+
+def test_disabled_providers_corrupt_json_ignored(store: Storage) -> None:
+    store.config["settings"][Storage.DISABLED_SETTING_KEY] = "{не json"
+    assert store.get_disabled_providers() == {}
+
+
+def test_disabled_providers_missing_setting(store: Storage) -> None:
+    store.config["settings"].pop(Storage.DISABLED_SETTING_KEY, None)
+    assert store.get_disabled_providers() == {}
+
+
+def test_disabled_snapshot_has_no_secrets(store: Storage) -> None:
+    """В config.json не должно попасть api_key — только отпечаток."""
+    from llm.router import LLMRouter, Provider
+
+    p = Provider(name="gemini", base_url="https://g/v1", api_key="super-secret-key", model="m")
+    router = LLMRouter([p])
+    router.states["gemini"].disabled = True
+    router.states["gemini"].disabled_reason = "authentication failed (401/403)"
+
+    snap = router.disabled_snapshot()
+    store.set_disabled_providers(snap)
+    store.save()
+
+    raw = (store.dir / CONFIG_FILE).read_text(encoding="utf-8")
+    assert "super-secret-key" not in raw
+    assert p.key_fp in raw

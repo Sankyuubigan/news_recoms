@@ -9,7 +9,7 @@ from filters.ad_filter import AdFilter
 from filters.dedup import DedupIndex, content_hash, normalize_url
 from learner import run_learner
 from llm.prompts import SYSTEM_PROMPT, build_scoring_user_prompt
-from llm.router import AllProvidersFailed, build_router_from_json
+from llm.router import AllProvidersFailed, ProvidersConfigError, build_router_from_json
 from llm.youtube_video import apply_deep_summary
 from models import IngestItem, RawPost, RunStats, SourceConfig
 from notifier import TelegramNotifier
@@ -150,14 +150,24 @@ def main(argv: list[str] | None = None) -> int:
 
     all_payload = pending_payload + new_payload
     scores: dict[str, dict] = {}
+    router = None
 
     if all_payload:
-        router = None
+        # Состояние «ключ выключен» с прошлого прогона (TTL 24ч внутри роутера).
+        disabled_snapshot = storage.get_disabled_providers()
+        if disabled_snapshot:
+            log.info("из прошлого прогона выключено провайдеров: %d", len(disabled_snapshot))
+
         try:
-            router = build_router_from_json(settings.llm_providers_json)
+            router = build_router_from_json(settings.llm_providers_json, disabled=disabled_snapshot)
+        except ProvidersConfigError as e:
+            # Показываем КАЖДУЮ проблему отдельной строкой в runs.json → UI «Логи запусков».
+            log.error("конфигурация LLM невалидна — %d проблем:", len(e.problems))
+            for i, p in enumerate(e.problems, 1):
+                log.error("  %d. %s", i, p)
+                stats.errors.append(f"LLM config: {p}")
+            llm_unconfigured = True
         except ValueError as e:
-            # Нет ключей — не роняем прогон: посты сохранятся в pending_ai
-            # и дообработаются, как только появится секрет LLM_PROVIDERS_JSON.
             log.error("LLM is not configured: %s", e)
             stats.errors.append(f"llm not configured: {e}")
             llm_unconfigured = True
@@ -187,6 +197,15 @@ def main(argv: list[str] | None = None) -> int:
                 log.exception("LLM stage crashed")
                 stats.errors.append(f"llm: {e}")
                 status_ok = False
+            finally:
+                # Даже при падении сохраняем состояние: иначе мёртвый ключ будет
+                # тратить запрос в каждом следующем прогоне.
+                stats.provider_stats = router.stats()
+                if not settings.dry_run:
+                    try:
+                        storage.set_disabled_providers(router.disabled_snapshot())
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("cannot persist disabled providers: %s", e)
     else:
         log.info("nothing to score")
 
@@ -292,7 +311,12 @@ def main(argv: list[str] | None = None) -> int:
     # ---------------------------------------------------------- 8. learner
     if not settings.dry_run and not llm_unconfigured:
         try:
-            router = build_router_from_json(settings.llm_providers_json)
+            # Переиспользуем роутер прогона: его состояние уже знает, какие ключи
+            # мертвы — learner не будет тратить на них запросы.
+            if router is None:
+                router = build_router_from_json(
+                    settings.llm_providers_json, disabled=storage.get_disabled_providers()
+                )
             run_learner(storage, router, bundle)
         except Exception as e:  # noqa: BLE001
             log.warning("learner failed: %s", e)

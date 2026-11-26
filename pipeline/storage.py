@@ -280,6 +280,54 @@ class Storage:
                 return s
         return None
 
+    # -------------------------------------------------- disabled LLM providers
+    # Ключ, умерший от 401, не должен тратить запрос в каждом следующем прогоне.
+    # Храним в config.json → settings.disabled_providers как JSON-СТРОКУ, чтобы не
+    # менять тип DataConfig.settings (Record<string,string>) на фронтенде.
+
+    DISABLED_SETTING_KEY = "disabled_providers"
+
+    def get_disabled_providers(self) -> dict[str, dict]:
+        """Снимок выключенных ключей: {state_key: {name, reason, at, until, model}}."""
+        raw = (self.config.get("settings") or {}).get(self.DISABLED_SETTING_KEY) or ""
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except json.JSONDecodeError:
+            log.warning("storage: %s is not valid JSON — ignoring", self.DISABLED_SETTING_KEY)
+            return {}
+        if not isinstance(data, list):
+            return {}
+
+        out: dict[str, dict] = {}
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("key") or "").strip()
+            if key:
+                out[key] = entry
+        return out
+
+    def set_disabled_providers(self, entries: list[dict]) -> dict:
+        """Перезаписывает снимок целиком (только выключенные, без секретов)."""
+        settings = self.config.setdefault("settings", {})
+        settings[self.DISABLED_SETTING_KEY] = json.dumps(entries, ensure_ascii=False)
+        self.config["updated_at"] = now_iso()
+        self._dirty_config = True
+
+        if entries:
+            log.warning(
+                "storage: %d провайдер(ов) помечены выключенными до следующей перепроверки: %s",
+                len(entries),
+                ", ".join(f"{e.get('name')} ({e.get('key_fp')})" for e in entries),
+            )
+            for e in entries:
+                log.warning("  • %s: %s (до %s)", e.get("name"), e.get("reason"), e.get("until"))
+        else:
+            log.info("storage: выключенных провайдеров нет — снимок очищен")
+        return {"ok": True, "count": len(entries)}
+
     # ------------------------------------------------------------ user state
 
     def merge_user_state(self) -> int:
