@@ -81,7 +81,7 @@ def probe(key_name: str, key: str, model: str, attempts: int = 4) -> dict:
                     "temperature": 0,
                     "max_tokens": 200,
                 },
-                timeout=60.0,
+                timeout=25.0,
             )
         except Exception as e:  # noqa: BLE001
             out["codes"].append(f"EXC:{type(e).__name__}")
@@ -108,7 +108,11 @@ def probe(key_name: str, key: str, model: str, attempts: int = 4) -> dict:
             out["message"] = r.text[:300]
             break
 
-        err = body.get("error") or body
+        # Google на OpenAI-совместимом пути отдаёт ошибку СПИСКОМ
+        # [{"error": {...}}], а не объектом. Раньше зонд падал здесь.
+        if isinstance(body, list):
+            body = body[0] if body else {}
+        err = body.get("error") or body if isinstance(body, dict) else {}
         details = err.get("details") or []
         for d in details:
             # google.rpc.QuotaFailure
@@ -121,13 +125,14 @@ def probe(key_name: str, key: str, model: str, attempts: int = 4) -> dict:
                 out["retry_delay"] = d["retryDelay"]
         out["message"] = (err.get("message") or "")[:200]
 
-        # 429 по квоте дальше долбить бессмысленно — только жжём.
-        if r.status_code == 429 and out["quota_id"]:
-            break
-        # 503 перегрузка — подождём и попробуем ещё, чтобы понять, стабильно ли.
+        # 503 перегрузка / таймаут — подождём и попробуем ещё, чтобы понять,
+        # стабильна ли модель вообще, а не списать случайный сбой на квоту.
         if r.status_code == 503:
             time.sleep(3)
             continue
+        # 429 по квоте дальше долбить бессмысленно — только жжём.
+        if r.status_code == 429:
+            break
         break
 
     return out
