@@ -518,6 +518,10 @@ def _classify_error(exc: Exception) -> str:
         # JSON-режим и повторить тот же запрос, это не ошибка ключа и не ошибка модели.
         if "response_format" in msg or "json_object" in msg or "json mode" in msg:
             return "json_unsupported"
+        # Groq: модель не смогла сгенерировать валидный JSON на этом батче.
+        # Лечится уменьшением батча, а не сменой ключа.
+        if "json_validate_failed" in msg or "failed to generate json" in msg:
+            return "bad_json"
         if "context" in msg or "too long" in msg or "maximum" in msg:
             return "context"
         # 400 вида "model not found" / "unsupported model" / "decommissioned"
@@ -648,22 +652,32 @@ class LLMRouter:
         system_prompt: str,
         build_user_prompt: Callable[[list[dict]], str],
         posts_payload: list[dict],
-        max_rounds: int = 40,
+        max_rounds: int | None = None,
     ) -> dict[str, LLMResultItem]:
         """Оценивает посты, возвращает map temp_id -> LLMResultItem.
 
         Реализует adaptive batch splitting: если провайдер упал, остаток дробится
         под max_batch_size следующего живого провайдера; при context-length ошибке
         батч конкретного провайдера ужимается вдвое.
+
+        Предохранитель — не «N раундов всего» (при батче 3 и 134 постах это
+        гарантированный обрыв), а «N раундов БЕЗ ПРОГРЕССА подряд»: пока посты
+        обрабатываются, крутимся сколько нужно.
         """
         results: dict[str, LLMResultItem] = {}
         queue = list(posts_payload)
         rounds = 0
+        stall = 0
+        # Терпим серию неудач: кулдауны, переключения моделей, ужимание батча.
+        max_stall = 3 * max(1, len(self.providers)) + 5
+        hard_limit = max_rounds or (len(queue) + 1) * max(1, len(self.providers)) + 50
 
         while queue:
             rounds += 1
-            if rounds > max_rounds:
-                raise AllProvidersFailed(f"max rounds exceeded, {len(queue)} items left")
+            if rounds > hard_limit:
+                raise AllProvidersFailed(
+                    f"превышен предел раундов ({hard_limit}), {len(queue)} постов не обработано"
+                )
 
             provider = self._next_provider_waiting()
             if provider is None:
@@ -676,30 +690,48 @@ class LLMRouter:
 
             try:
                 items = self._call_scoring(provider, system_prompt, build_user_prompt, chunk)
+                done = {item.temp_id for item in items}
                 for item in items:
                     results[item.temp_id] = item
                 st.ok += 1
-                queue = queue[chunk_size:]
+                # Сдвигаем очередь только на реально обработанные посты: если модель
+                # вернула меньше, чем просили, остаток пробуем ещё раз (другим
+                # провайдером или меньшим батчем), а не теряем до следующего прогона.
+                queue = [p for p in queue if p["temp_id"] not in done]
+                if len(done) < len(chunk):
+                    log.warning(
+                        "provider %s: вернул %d из %d постов, остаток в очередь",
+                        provider.name,
+                        len(done),
+                        len(chunk),
+                    )
+                stall = 0
             except AllProvidersFailed:
                 raise
             except Exception as e:  # noqa: BLE001 — любая ошибка провайдера = failover
                 kind = _classify_error(e)
                 st.err += 1
+                stall += 1
                 self._handle_failure(provider, kind, e)
                 log.warning("provider %s failed (%s): %s", provider.name, kind, str(e)[:200])
 
                 if kind == "context" and chunk_size > 1:
                     # ужимаем батч этого провайдера вдвое и пробуем снова
                     st.dynamic_cap = max(1, chunk_size // 2)
-                elif kind == "rate" and chunk_size > 1:
-                    # 429 — упёрлись в лимит. Если это TPM (токены в минуту),
-                    # виноват не размер запроса как таковой, а их сумма. Но уменьшить
-                    # батч всё равно полезно: меньше токенов за раз — плавнее график.
+                elif kind in ("rate", "bad_json") and chunk_size > 1:
+                    # 429 (TPM) и «не смог сгенерировать JSON» лечатся размером
+                    # запроса: меньше постов за раз — меньше токенов и проще ответ.
                     st.dynamic_cap = max(1, min(st.dynamic_cap or chunk_size, chunk_size // 2))
                     log.info(
-                        "provider %s: лимит, ужимаю батч до %d постов",
+                        "provider %s: %s, ужимаю батч до %d постов",
                         provider.name,
+                        "лимит" if kind == "rate" else "битый JSON",
                         st.dynamic_cap,
+                    )
+
+                if stall >= max_stall:
+                    raise AllProvidersFailed(
+                        f"{stall} раундов подряд без прогресса, {len(queue)} постов не обработано"
                     )
                 # очередь не двигается — следующий живой провайдер возьмёт её (уже с его max_batch_size)
                 continue
@@ -790,7 +822,25 @@ class LLMRouter:
         elif kind == "rate":
             st.cooldown_until = time.monotonic() + self._retry_after(exc, self.COOLDOWN_RATE)
         elif kind == "overload":
-            st.cooldown_until = time.monotonic() + self.COOLDOWN_OVERLOAD
+            # 503 «high demand» привязан к КОНКРЕТНОЙ модели, а не к ключу.
+            # У Gemini flash может лежать часами, пока flash-lite работает.
+            # Поэтому сначала пробуем следующую модель этого же ключа и только
+            # когда модели кончились — уводим провайдера в кулдаун.
+            models = provider.model_list
+            if len(models) > 1 and st.model_idx + 1 < len(models):
+                # Новая модель не перегружена — кулдаун не нужен, пробуем сразу.
+                st.model_idx += 1
+                log.warning(
+                    "provider %s: model %r overloaded (503), switching to %r",
+                    provider.name,
+                    models[st.model_idx - 1],
+                    models[st.model_idx],
+                )
+            else:
+                # Все модели перегружены — ждём, а после кулдауна начинаем
+                # заново с лучшей модели, а не с последней резервной.
+                st.model_idx = 0
+                st.cooldown_until = time.monotonic() + self.COOLDOWN_OVERLOAD
         elif kind == "context":
             # провайдер жив — просто батч слишком большой, cap ужимается отдельно
             pass

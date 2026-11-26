@@ -885,6 +885,39 @@ class TestCooldownWaiting:
         assert router._retry_after(ValueError("x"), 60.0) == 60.0
 
 
+    def test_partial_results_keep_rest_in_queue(self) -> None:
+        """Модель вернула меньше постов — остаток не теряется, а дообрабатывается."""
+        p = make_provider("p", 4)
+        router = LLMRouter([p])
+
+        def half(chunk: list[dict]) -> list[dict]:
+            return ok_results(chunk[: max(1, len(chunk) // 2)])
+
+        fake = FakeCompletion([half] * 40)
+
+        with patch.object(router, "_raw_completion", side_effect=_raw_wrapper(router, fake)):
+            with patch("llm.router.time.sleep"):
+                results = router.score("sys", simple_prompt, build_payload(4))
+
+        # все 4 поста в итоге оценены, хотя каждый ответ был неполным
+        assert len(results) == 4
+
+    def test_no_progress_stops_instead_of_spinning(self) -> None:
+        """Провайдер стабильно отдаёт битый ответ — не крутимся вечно."""
+        p = make_provider("p", 4)
+        router = LLMRouter([p])
+
+        def empty(chunk: list[dict]) -> list[dict]:
+            raise ValueError("empty results array")
+
+        fake = FakeCompletion([empty] * 200)
+
+        with patch.object(router, "_raw_completion", side_effect=_raw_wrapper(router, fake)):
+            with patch("llm.router.time.sleep"):
+                with pytest.raises(AllProvidersFailed):
+                    router.score("sys", simple_prompt, build_payload(4))
+
+
 class TestStats:
     def test_stats_tracked(self) -> None:
         p1, p2 = make_provider("p1", 5), make_provider("p2", 5)
