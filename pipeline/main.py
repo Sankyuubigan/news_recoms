@@ -194,8 +194,21 @@ def main(argv: list[str] | None = None) -> int:
                 stats.provider_stats = router.stats()
                 log.info("LLM scored %d/%d items", len(scores), len(all_payload))
             except AllProvidersFailed as e:
+                # Часть постов могла быть оценена до отказа — сохраняем их.
+                # Выбросить оплаченную работу только потому, что на остатке
+                # кончились лимиты, значит сжечь квоту впустую.
+                for temp_id, r in e.partial.items():
+                    scores[temp_id] = r.model_dump(mode="json")
+                if scores:
+                    log.warning(
+                        "LLM остановился (%s), но %d постов из %d уже оценены — сохраняю их",
+                        e,
+                        len(scores),
+                        len(all_payload),
+                    )
                 log.error("all LLM providers failed: %s", e)
                 stats.errors.append(f"all providers failed: {e}")
+                stats.ai_processed_count = len(scores)
                 status_ok = False
             except Exception as e:  # noqa: BLE001
                 log.exception("LLM stage crashed")

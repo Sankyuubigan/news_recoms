@@ -80,6 +80,20 @@ class FakeCompletion:
         return json.dumps({"results": results})
 
 
+def make_quota_error() -> openai.RateLimitError:
+    """429 «exceeded your current quota» — дневная квота, а не минутный лимит."""
+    return openai.RateLimitError(
+        "Error code: 429 - You exceeded your current quota, please check your plan and billing details.",
+        response=httpx.Response(429, request=_req()),
+        body={
+            "error": {
+                "code": 429,
+                "message": "You exceeded your current quota, please check your plan and billing details.",
+            }
+        },
+    )
+
+
 def make_provider(name: str, batch: int = 30) -> Provider:
     return Provider(
         name=name,
@@ -792,8 +806,11 @@ class TestProvidersFile:
         router = build_router_from_json("", providers_file=str(path))
         assert len(router.providers) == 3
         names = [p.name for p in router.providers]
-        assert names == ["gemini-flash-primary", "gemini-flash-account-2", "groq-gpt-oss"]
-        assert router.providers[0].model_list == ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+        # Groq идёт первым: у Gemini квота free-tier выедается мгновенно,
+        # а Groq отдаёт 200 стабильно — он и должен быть основным.
+        assert names == ["groq-qwen", "gemini-flash-primary", "gemini-flash-account-2"]
+        assert router.providers[0].model_list[0] == "qwen/qwen3.8-27b"
+        assert router.providers[1].model_list == ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
 
 
 class TestCooldownWaiting:
@@ -916,6 +933,91 @@ class TestCooldownWaiting:
             with patch("llm.router.time.sleep"):
                 with pytest.raises(AllProvidersFailed):
                     router.score("sys", simple_prompt, build_payload(4))
+
+
+class TestQuotaExhausted:
+    """429 «exceeded your current quota» — это дневная квота, не минутный лимит.
+
+    Ждать её бессмысленно: роутер должен ВЫКЛЮЧИТЬ ключ, а не спать час.
+    """
+
+    def test_quota_is_classified_separately_from_rate(self) -> None:
+        from llm.router import _classify_error
+
+        assert _classify_error(make_quota_error()) == "quota"
+        assert _classify_error(make_rate_limit_error()) == "rate"
+
+    def test_quota_disables_provider_without_waiting(self) -> None:
+        p1, p2 = make_provider("gemini", 5), make_provider("groq", 5)
+        router = LLMRouter([p1, p2])
+        fake = FakeCompletion([make_quota_error(), ok_results])
+
+        with patch.object(router, "_raw_completion", side_effect=_raw_wrapper(router, fake)):
+            with patch("llm.router.time.sleep") as mock_sleep:
+                results = router.score("sys", simple_prompt, build_payload(3))
+
+        # ключ выключен, но работу сделал второй провайдер — и без сна
+        assert router.states["gemini"].disabled is True
+        assert "квота" in router.states["gemini"].disabled_reason
+        assert len(results) == 3
+        mock_sleep.assert_not_called()
+
+    def test_quota_ttl_is_not_24h(self) -> None:
+        """Квота возвращается по расписанию провайдера, а не через сутки."""
+        p = make_provider("gemini", 5)
+        router = LLMRouter([p])
+        fake = FakeCompletion([make_quota_error()])
+
+        with patch.object(router, "_raw_completion", side_effect=_raw_wrapper(router, fake)):
+            with patch("llm.router.time.sleep"):
+                with pytest.raises(AllProvidersFailed):
+                    router.score("sys", simple_prompt, build_payload(3))
+
+        assert router.states["gemini"].disabled_ttl_hours > 0
+        assert router.states["gemini"].disabled_ttl_hours != router.DISABLED_TTL_HOURS
+
+    def test_quota_snapshot_records_until(self) -> None:
+        p = make_provider("gemini", 5)
+        router = LLMRouter([p])
+        router.states["gemini"].disabled = True
+        router.states["gemini"].disabled_reason = "квота"
+        router.states["gemini"].disabled_ttl_hours = 7.5
+
+        snap = router.disabled_snapshot()
+        assert len(snap) == 1
+        assert snap[0]["until"].endswith("Z")
+        assert "key" in snap[0]
+
+
+class TestPartialResultsPreserved:
+    """Уже оценённые посты нельзя терять из-за отказа на остатке."""
+
+    def test_all_providers_failed_carries_partial(self) -> None:
+        p = make_provider("only", 2)
+        router = LLMRouter([p])
+        # первый батч ок, второй — квота, дальше некому
+        fake = FakeCompletion([ok_results, make_quota_error()])
+
+        with patch.object(router, "_raw_completion", side_effect=_raw_wrapper(router, fake)):
+            with patch("llm.router.time.sleep"):
+                with pytest.raises(AllProvidersFailed) as ei:
+                    router.score("sys", simple_prompt, build_payload(6))
+
+        partial = ei.value.partial
+        assert len(partial) == 2, "два уже оценённых поста должны уцелеть"
+        assert all(k.startswith("item_") for k in partial)
+
+    def test_partial_empty_when_nothing_scored(self) -> None:
+        p = make_provider("only", 5)
+        router = LLMRouter([p])
+        fake = FakeCompletion([make_quota_error()])
+
+        with patch.object(router, "_raw_completion", side_effect=_raw_wrapper(router, fake)):
+            with patch("llm.router.time.sleep"):
+                with pytest.raises(AllProvidersFailed) as ei:
+                    router.score("sys", simple_prompt, build_payload(3))
+
+        assert ei.value.partial == {}
 
 
 class TestStats:

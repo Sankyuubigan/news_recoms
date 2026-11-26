@@ -7,7 +7,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -200,6 +200,9 @@ class ProviderState:
     model_idx: int = 0  # текущая модель в Provider.model_list
     # Почему выключен — чтобы это попало в config.json и было видно в логах.
     disabled_reason: str = ""
+    # Индивидуальный срок блокировки в часах. 0 = взять DISABLED_TTL_HOURS.
+    # Нужен для квоты: она возвращается по расписанию провайдера, а не через сутки.
+    disabled_ttl_hours: float = 0.0
 
     def available(self, now: float | None = None) -> bool:
         now = now if now is not None else time.monotonic()
@@ -207,7 +210,16 @@ class ProviderState:
 
 
 class AllProvidersFailed(Exception):
-    """Все провайдеры недоступны — остаток уходит в pending_ai."""
+    """Все провайдеры недоступны — остаток уходит в pending_ai.
+
+    `partial` — то, что УЖЕ оценено до отказа. Терять эту работу нельзя:
+    провайдер мог честно обработать 40 постов из 126, и выбросить их только
+    потому, что на 41-м кончились лимиты, — значит сжечь чужую квоту зря.
+    """
+
+    def __init__(self, message: str, partial: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.partial: dict[str, Any] = dict(partial or {})
 
 
 class ProvidersConfigError(ValueError):
@@ -499,7 +511,7 @@ def extract_json(raw: str) -> dict:
 def _classify_error(exc: Exception) -> str:
     """Классифицирует ошибку.
 
-    auth | rate | overload | context | model_gone | json_unsupported | bad_json | other
+    auth | rate | quota | overload | context | model_gone | json_unsupported | bad_json | other
     """
     if isinstance(exc, ValueError):
         return "bad_json"
@@ -508,6 +520,13 @@ def _classify_error(exc: Exception) -> str:
     if isinstance(exc, openai.PermissionDeniedError):
         return "auth"
     if isinstance(exc, openai.RateLimitError):
+        # 429 бывает двух принципиально разных видов:
+        #   • минутный лимит (TPM/RPM) — подождать и всё наладится;
+        #   • исчерпанная дневная квота — ждать бессмысленно, вернётся завтра.
+        # Второй надо распознать, иначе роутер будет впустую спать весь прогон.
+        msg = str(exc).lower()
+        if "exceeded your current quota" in msg or "check your plan and billing" in msg:
+            return "quota"
         return "rate"
     if isinstance(exc, openai.NotFoundError):
         # Модель выпилена/переименована у провайдера — ключ при этом жив.
@@ -553,6 +572,10 @@ class LLMRouter:
     # Сколько живёт «ключ выключен» в config.json. Раз в сутки перепроверяем:
     # ключ могли починить/оплатить, а вечная блокировка — тоже плохо.
     DISABLED_TTL_HOURS = 24.0
+    # Минимальный батч при ужимании. Мельче — только лишние накладные расходы:
+    # каждый запрос тащит ~2k токенов системного промпта, и на батче из 1 поста
+    # TPM пробивается ещё быстрее, чем на батче из 3.
+    MIN_BATCH = 3
 
     def __init__(self, providers: list[Provider], disabled: dict[str, dict] | None = None) -> None:
         self.providers = [p for p in providers if p.usable]
@@ -620,12 +643,12 @@ class LLMRouter:
     def disabled_snapshot(self) -> list[dict]:
         """Что записать в config.json: только реально выключенные, без секретов."""
         now = datetime.now(timezone.utc)
-        until = _iso_after(self.DISABLED_TTL_HOURS)
         out: list[dict] = []
         for p in self.providers:
             st = self.states[p.name]
             if not st.disabled:
                 continue
+            ttl = st.disabled_ttl_hours or self.DISABLED_TTL_HOURS
             out.append(
                 {
                     "key": p.state_key,
@@ -634,10 +657,31 @@ class LLMRouter:
                     "model": self._current_model(p),
                     "reason": (st.disabled_reason or "disabled")[:300],
                     "at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "until": until,
+                    "until": _iso_after(ttl),
                 }
             )
         return out
+
+    def _hours_until_quota_reset(self) -> float:
+        """Сколько часов до сброса дневной квоты Gemini (полночь по Тихоокеанскому).
+
+        Квота Gemini сбрасывается в 00:00 America/Los_Angeles. Жёстко зашивать
+        UTC-8 нельзя: летом там UTC-7. Считаем по факту — через zoneinfo, а если
+        его нет (старый Windows без tzdata) — консервативно 24 часа.
+        """
+        try:
+            from zoneinfo import ZoneInfo
+
+            tz = ZoneInfo("America/Los_Angeles")
+            now_pt = datetime.now(tz)
+            next_midnight = (now_pt + timedelta(days=1)).replace(
+                hour=0, minute=5, second=0, microsecond=0
+            )
+            hours = (next_midnight - now_pt).total_seconds() / 3600.0
+            # Не меньше часа: если прогон ровно в полночь, не выключаем на 5 минут.
+            return max(1.0, round(hours, 2))
+        except Exception:  # noqa: BLE001 — нет tzdata, не страшно
+            return 24.0
 
     # ---------------------------------------------------------------- public
 
@@ -676,12 +720,13 @@ class LLMRouter:
             rounds += 1
             if rounds > hard_limit:
                 raise AllProvidersFailed(
-                    f"превышен предел раундов ({hard_limit}), {len(queue)} постов не обработано"
+                    f"превышен предел раундов ({hard_limit}), {len(queue)} постов не обработано",
+                    partial=results,
                 )
 
             provider = self._next_provider_waiting()
             if provider is None:
-                raise AllProvidersFailed(f"{len(queue)} items left unprocessed")
+                raise AllProvidersFailed(f"{len(queue)} items left unprocessed", partial=results)
 
             st = self.states[provider.name]
             cap = provider.max_batch_size if st.dynamic_cap is None else min(provider.max_batch_size, st.dynamic_cap)
@@ -718,10 +763,13 @@ class LLMRouter:
                 if kind == "context" and chunk_size > 1:
                     # ужимаем батч этого провайдера вдвое и пробуем снова
                     st.dynamic_cap = max(1, chunk_size // 2)
-                elif kind in ("rate", "bad_json") and chunk_size > 1:
+                elif kind in ("rate", "bad_json") and chunk_size > self.MIN_BATCH:
                     # 429 (TPM) и «не смог сгенерировать JSON» лечатся размером
                     # запроса: меньше постов за раз — меньше токенов и проще ответ.
-                    st.dynamic_cap = max(1, min(st.dynamic_cap or chunk_size, chunk_size // 2))
+                    # Но не мельче MIN_BATCH: каждый запрос тащит ~2k токенов
+                    # системного промпта, и на батче 1 накладные расходы съедают
+                    # всю экономию — TPM пробивается ещё быстрее.
+                    st.dynamic_cap = max(self.MIN_BATCH, min(st.dynamic_cap or chunk_size, chunk_size // 2))
                     log.info(
                         "provider %s: %s, ужимаю батч до %d постов",
                         provider.name,
@@ -731,7 +779,8 @@ class LLMRouter:
 
                 if stall >= max_stall:
                     raise AllProvidersFailed(
-                        f"{stall} раундов подряд без прогресса, {len(queue)} постов не обработано"
+                        f"{stall} раундов подряд без прогресса, {len(queue)} постов не обработано",
+                        partial=results,
                     )
                 # очередь не двигается — следующий живой провайдер возьмёт её (уже с его max_batch_size)
                 continue
@@ -821,6 +870,24 @@ class LLMRouter:
             st.disabled_reason = "authentication failed (401/403): ключ недействителен, отозван или без доступа к модели"
         elif kind == "rate":
             st.cooldown_until = time.monotonic() + self._retry_after(exc, self.COOLDOWN_RATE)
+        elif kind == "quota":
+            # Дневная квота выбрана — до конца прогона этот ключ бесполезен.
+            # Не кулдаун, а полное выключение: иначе роутер будет ждать впустую.
+            st.disabled = True
+            st.disabled_reason = (
+                "исчерпана квота провайдера (429 «exceeded your current quota»). "
+                "Вернётся по расписанию провайдера — обычно в полночь по Тихоокеанскому времени"
+            )
+            # Квота НЕ восстанавливается через 24 часа как отозванный ключ:
+            # она сбрасывается по расписанию провайдера. Держим блокировку до
+            # ближайшей полуночи PT (UTC-8/UTC-7) плюс запас, чтобы не биться
+            # впустую весь день.
+            st.disabled_ttl_hours = self._hours_until_quota_reset()
+            log.error(
+                "provider %s: дневная квота исчерпана — выключаю на %.1fч (до сброса квоты)",
+                provider.name,
+                st.disabled_ttl_hours,
+            )
         elif kind == "overload":
             # 503 «high demand» привязан к КОНКРЕТНОЙ модели, а не к ключу.
             # У Gemini flash может лежать часами, пока flash-lite работает.
