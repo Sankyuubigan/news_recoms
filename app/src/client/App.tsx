@@ -5,7 +5,7 @@ import { getToken, setDataRepoOverride, setToken } from "./api/github";
 import { useKeyboardNav, type KeyAction } from "./hooks/useKeyboardNav";
 import SidebarNav, { type Tab } from "./components/SidebarNav";
 import FeedList from "./components/FeedList";
-import DislikeToast, { type DislikeState } from "./components/DislikeToast";
+import FeedbackToast, { type FeedbackState } from "./components/FeedbackToast";
 import SourcesManager from "./components/SourcesManager";
 import RulesAndProfile from "./components/RulesAndProfile";
 import PipelineLogs from "./components/PipelineLogs";
@@ -68,7 +68,7 @@ export default function App() {
   const [debouncedQuery, setDebouncedQuery] = useState("");
 
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
-  const [dislike, setDislike] = useState<DislikeState | null>(null);
+  const [feedback, setFeedback] = useState<FeedbackState | null>(null);
 
   const [sources, setSources] = useState<Source[]>([]);
   const [settings, setSettings] = useState<Record<string, string>>({});
@@ -152,14 +152,19 @@ export default function App() {
       case "save":
         patchItem(item.id, { status: item.status === "saved" ? "inbox" : "saved" });
         break;
-      case "like":
+      case "like": {
+        // Лайк ставим сразу, а причину — если захочет, в тосте.
         patchItem(item.id, { feedback: item.feedback === "like" ? "none" : "like" });
+        if (item.feedback !== "like") {
+          setFeedback({ itemId: item.id, title: item.title_ru || item.title_orig, kind: "like" });
+        }
         break;
+      }
       case "restore":
         patchItem(item.id, { status: "inbox", feedback: "like" });
         break;
       case "dislike": {
-        setDislike({ itemId: item.id, title: item.title_ru || item.title_orig });
+        setFeedback({ itemId: item.id, title: item.title_ru || item.title_orig, kind: "dislike" });
         patchItem(item.id, { feedback: "dislike", status: "archived" });
         setItems((prev) => prev.filter((it) => it.id !== item.id));
         break;
@@ -170,20 +175,33 @@ export default function App() {
     }
   };
 
-  const handleDislikeReason = (reason: string) => {
-    if (!dislike) return;
-    store.patchItem(dislike.itemId, { feedback: "dislike", feedback_reason: reason });
-    setDislike(null);
+  const handleFeedbackReason = (reason: string) => {
+    if (!feedback) return;
+    const kind = feedback.kind;
+    store.patchItem(feedback.itemId, {
+      feedback: kind,
+      feedback_reason: reason,
+      // Дизлайк уже увёл пост в архив, лайк статус не меняет.
+      ...(kind === "dislike" ? { status: "archived" as const } : {}),
+    });
+    setFeedback(null);
   };
 
-  const handleUndoDislike = () => {
-    if (!dislike) return;
-    patchItem(dislike.itemId, { status: "inbox", feedback: "none" });
-    setDislike(null);
+  const handleUndoFeedback = () => {
+    if (!feedback) return;
+    const kind = feedback.kind;
+    patchItem(feedback.itemId, {
+      feedback: "none",
+      feedback_reason: null,
+      ...(kind === "dislike" ? { status: "inbox" as const } : {}),
+    });
+    setFeedback(null);
   };
 
   const archiveAll = async () => {
-    const ids = items.map((i) => i.id);
+    // Берём ID ВСЕЙ вкладки, а не только загруженных 60: иначе в архиве
+    // оставались бы сотни непросмотренных, которые просто не попали в экран.
+    const ids = await api.feedIds({ status: tab, category, q: debouncedQuery });
     if (!ids.length) return;
     await api.bulk("archive_ids", { ids });
     void loadFeed();
@@ -329,11 +347,11 @@ export default function App() {
         </main>
       </div>
 
-      <DislikeToast
-        state={dislike}
-        onReason={handleDislikeReason}
-        onUndo={handleUndoDislike}
-        onClose={() => setDislike(null)}
+      <FeedbackToast
+        state={feedback}
+        onReason={handleFeedbackReason}
+        onUndo={handleUndoFeedback}
+        onClose={() => setFeedback(null)}
       />
 
       <SyncModal open={syncModalOpen} onClose={() => setSyncModalOpen(false)} />

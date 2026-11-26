@@ -44,6 +44,12 @@ export const api = {
     return store.getFeed(params);
   },
 
+  /** ID всех постов вкладки (не только загруженных 60) — для «Всё просмотрено». */
+  async feedIds(params: { status: string; category?: string; q?: string }): Promise<string[]> {
+    await store.load();
+    return store.getFeedIds(params);
+  },
+
   async sources(): Promise<{ sources: Source[] }> {
     await store.load();
     return { sources: store.getSources() };

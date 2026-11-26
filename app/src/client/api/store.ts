@@ -250,34 +250,24 @@ class FeedStore {
     });
   }
 
-  getFeed(params: {
+  /**
+   * Фильтрация вкладки — ОДИН источник правды для getFeed и getFeedIds.
+   * Иначе «показать 60» и «отметить всё» начнут расходиться.
+   */
+  private filtered(params: {
     status: string;
-    sort: "score" | "date";
+    sort?: "score" | "date";
     category?: string;
     q?: string;
-    limit?: number;
-    offset?: number;
-  }): FeedResponse {
-    const all = this.getMerged();
-    const visible = all.filter((it) => it.status !== "pending_ai");
+  }): FeedItem[] {
+    let filtered = this.getMerged().filter(
+      (it) => it.status !== "pending_ai" && it.status === params.status,
+    );
 
-    const counts = { inbox: 0, saved: 0, archived: 0, rejected: 0, pending_ai: 0 };
-    for (const it of all) {
-      if (it.status in counts) counts[it.status as keyof typeof counts] += 1;
-    }
-
-    const categories = Array.from(
-      new Set(
-        visible
-          .filter((it) => it.status === "inbox" && it.category && it.category !== "Общее")
-          .map((it) => it.category as string),
-      ),
-    ).slice(0, 20);
-
-    let filtered = visible.filter((it) => it.status === params.status);
     if (params.category && params.category !== "Все") {
       filtered = filtered.filter((it) => it.category === params.category);
     }
+
     const q = (params.q ?? "").trim().toLowerCase();
     if (q) {
       filtered = filtered.filter(
@@ -288,22 +278,54 @@ class FeedStore {
       );
     }
 
+    const sort = params.sort ?? "score";
     filtered.sort((a, b) => {
-      if (params.sort === "date") return (b.published_at ?? "").localeCompare(a.published_at ?? "");
+      if (sort === "date") return (b.published_at ?? "").localeCompare(a.published_at ?? "");
       const ds = (b.ai_score ?? 0) - (a.ai_score ?? 0);
       return ds !== 0 ? ds : (b.published_at ?? "").localeCompare(a.published_at ?? "");
     });
 
-    const total = filtered.length;
+    return filtered;
+  }
+
+  getFeed(params: {
+    status: string;
+    sort: "score" | "date";
+    category?: string;
+    q?: string;
+    limit?: number;
+    offset?: number;
+  }): FeedResponse {
+    const all = this.getMerged();
+
+    const counts = { inbox: 0, saved: 0, archived: 0, rejected: 0, pending_ai: 0 };
+    for (const it of all) {
+      if (it.status in counts) counts[it.status as keyof typeof counts] += 1;
+    }
+
+    const categories = Array.from(
+      new Set(
+        all
+          .filter((it) => it.status === "inbox" && it.category && it.category !== "Общее")
+          .map((it) => it.category as string),
+      ),
+    ).slice(0, 20);
+
+    const filtered = this.filtered(params);
     const offset = params.offset ?? 0;
     const limit = params.limit ?? 60;
 
     return {
       items: filtered.slice(offset, offset + limit),
-      total,
+      total: filtered.length,
       counts,
       categories,
     };
+  }
+
+  /** ID ВСЕХ постов вкладки с учётом фильтров — для кнопки «Всё просмотрено». */
+  getFeedIds(params: { status: string; category?: string; q?: string }): string[] {
+    return this.filtered(params).map((it) => it.id);
   }
 
   getConfig(): DataConfig | null {
