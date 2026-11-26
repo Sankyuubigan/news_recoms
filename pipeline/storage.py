@@ -91,8 +91,8 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
     {
         "id": 3,
         "type": "rss",
-        "name": "Hacker News",
-        "identifier": "https://news.ycombinator.com/rss",
+        "name": "3DNews",
+        "identifier": "https://3dnews.ru/news/rss/",
         "category_hint": "Индустрия",
         "fetch_full_text": 0,
         "enabled": 1,

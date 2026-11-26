@@ -51,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
 
     stats = RunStats()
     status_ok = True
+    llm_unconfigured = False
 
     bootstrap = storage.bundle()
     bundle = bootstrap.bundle()
@@ -151,31 +152,41 @@ def main(argv: list[str] | None = None) -> int:
     scores: dict[str, dict] = {}
 
     if all_payload:
+        router = None
         try:
             router = build_router_from_json(settings.llm_providers_json)
-            results = router.score(
-                SYSTEM_PROMPT,
-                lambda chunk: build_scoring_user_prompt(
-                    bundle.manual_rules,
-                    bundle.learned_profile,
-                    chunk,
-                    bootstrap.recent_clusters,
-                ),
-                all_payload,
-            )
-            for temp_id, r in results.items():
-                scores[temp_id] = r.model_dump(mode="json")
-            stats.ai_processed_count = len(scores)
-            stats.provider_stats = router.stats()
-            log.info("LLM scored %d/%d items", len(scores), len(all_payload))
-        except AllProvidersFailed as e:
-            log.error("all LLM providers failed: %s", e)
-            stats.errors.append(f"all providers failed: {e}")
-            status_ok = False
-        except Exception as e:  # noqa: BLE001
-            log.exception("LLM stage crashed")
-            stats.errors.append(f"llm: {e}")
-            status_ok = False
+        except ValueError as e:
+            # Нет ключей — не роняем прогон: посты сохранятся в pending_ai
+            # и дообработаются, как только появится секрет LLM_PROVIDERS_JSON.
+            log.error("LLM is not configured: %s", e)
+            stats.errors.append(f"llm not configured: {e}")
+            llm_unconfigured = True
+
+        if router is not None:
+            try:
+                results = router.score(
+                    SYSTEM_PROMPT,
+                    lambda chunk: build_scoring_user_prompt(
+                        bundle.manual_rules,
+                        bundle.learned_profile,
+                        chunk,
+                        bootstrap.recent_clusters,
+                    ),
+                    all_payload,
+                )
+                for temp_id, r in results.items():
+                    scores[temp_id] = r.model_dump(mode="json")
+                stats.ai_processed_count = len(scores)
+                stats.provider_stats = router.stats()
+                log.info("LLM scored %d/%d items", len(scores), len(all_payload))
+            except AllProvidersFailed as e:
+                log.error("all LLM providers failed: %s", e)
+                stats.errors.append(f"all providers failed: {e}")
+                status_ok = False
+            except Exception as e:  # noqa: BLE001
+                log.exception("LLM stage crashed")
+                stats.errors.append(f"llm: {e}")
+                status_ok = False
     else:
         log.info("nothing to score")
 
@@ -279,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
         log.info("telegram alerts sent: %d/%d", sent, len(alerts))
 
     # ---------------------------------------------------------- 8. learner
-    if not settings.dry_run:
+    if not settings.dry_run and not llm_unconfigured:
         try:
             router = build_router_from_json(settings.llm_providers_json)
             run_learner(storage, router, bundle)
@@ -294,11 +305,16 @@ def main(argv: list[str] | None = None) -> int:
             log.warning("prune failed: %s", e)
 
     # ------------------------------------------------------------- 10. stats
-    stats.status = (
-        "success"
-        if status_ok and not stats.errors
-        else ("partial" if stats.ai_processed_count else "failed")
-    )
+    if llm_unconfigured and stats.fetched_count:
+        # Данные собраны и записаны — просто без AI-скоринга. Это не фейл:
+        # иначе шаг коммита в ветку data не выполнится и новости пропадут.
+        stats.status = "partial"
+    else:
+        stats.status = (
+            "success"
+            if status_ok and not stats.errors
+            else ("partial" if stats.ai_processed_count else "failed")
+        )
     if not settings.dry_run:
         try:
             storage.record_run(stats)
