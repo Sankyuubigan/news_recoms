@@ -731,7 +731,7 @@ class TestApiKeyEnv:
         path = Path(__file__).resolve().parent.parent / "providers.json"
         router = build_router_from_json("", providers_file=str(path))
         assert len(router.providers) == 1
-        assert router.providers[0].name == "gemini-flash-primary"
+        assert router.providers[0].name == "gemini-flash-lite-1"
 
     def test_bad_env_name_is_reported(self) -> None:
         cfg = make_good_config()
@@ -806,11 +806,14 @@ class TestProvidersFile:
         router = build_router_from_json("", providers_file=str(path))
         assert len(router.providers) == 3
         names = [p.name for p in router.providers]
-        # Groq идёт первым: у Gemini квота free-tier выедается мгновенно,
+        # Groq идёт первым: у Gemini free-tier выедается мгновенно,
         # а Groq отдаёт 200 стабильно — он и должен быть основным.
-        assert names == ["groq-qwen", "gemini-flash-primary", "gemini-flash-account-2"]
+        assert names == ["groq-qwen", "gemini-flash-lite-1", "gemini-flash-lite-2"]
         assert router.providers[0].model_list[0] == "qwen/qwen3.8-27b"
-        assert router.providers[1].model_list == ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+        # В бесплатном тарифе осталась только flash-lite: flash/pro платные
+        # с апреля 2026, на них всегда приходит 429 «limit: 0».
+        for p in router.providers[1:]:
+            assert p.model_list == ["gemini-3.5-flash-lite"]
 
 
 class TestCooldownWaiting:
