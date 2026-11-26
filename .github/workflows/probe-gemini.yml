@@ -1,0 +1,29 @@
+name: Probe Gemini Quota
+
+# Ручной диагностический прогон: показывает, ЧТО именно выжигается
+# (суточная квота / минутная / токены) и какие пары ключ×модель живы.
+# В обычном пайплайне не участвует, запускается только вручную.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install httpx
+
+      - name: Probe
+        env:
+          GEMINI_KEY_1: ${{ secrets.GEMINI_KEY_1 }}
+          GEMINI_KEY_2: ${{ secrets.GEMINI_KEY_2 }}
+        run: python probe_gemini.py
+        working-directory: pipeline
