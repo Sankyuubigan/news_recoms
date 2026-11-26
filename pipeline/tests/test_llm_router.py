@@ -280,6 +280,82 @@ class TestBuildRouterFromJson:
         assert [p.api_key for p in router.providers] == ["k1", "k2", "k3"]
 
 
+class TestModelFallback:
+    def test_models_list_falls_back_on_model_gone(self) -> None:
+        """Модель выпилена у провайдера — берём следующую модель того же ключа."""
+        p = Provider(
+            name="gemini",
+            base_url="https://g/v1",
+            api_key="k1",
+            model="old-model",
+            models=["old-model", "new-model"],
+            max_batch_size=5,
+            rpm_delay_sec=0.0,
+            timeout_sec=5.0,
+        )
+        router = LLMRouter([p])
+        gone = openai.NotFoundError(
+            "model not found",
+            response=httpx.Response(404, request=_req()),
+            body={"error": {"message": "model not found"}},
+        )
+        fake = FakeCompletion([gone, ok_results])
+
+        with patch.object(router, "_raw_completion", side_effect=_raw_wrapper(router, fake)):
+            result = router.score("sys", simple_prompt, build_payload(2))
+
+        assert len(result) == 2
+        assert router.states["gemini"].model_idx == 1
+        assert router.states["gemini"].disabled is False
+        # ключ не выключен — провайдер продолжает работать на новой модели
+        assert router.states["gemini"].err == 1
+
+    def test_all_models_gone_disables_provider(self) -> None:
+        p = Provider(
+            name="only",
+            base_url="https://g/v1",
+            api_key="k1",
+            model="m1",
+            models=["m1"],
+            max_batch_size=5,
+            rpm_delay_sec=0.0,
+            timeout_sec=5.0,
+        )
+        router = LLMRouter([p])
+        gone = openai.NotFoundError(
+            "model not found",
+            response=httpx.Response(404, request=_req()),
+            body={"error": {"message": "model not found"}},
+        )
+
+        with pytest.raises(AllProvidersFailed):
+            with patch.object(router, "_raw_completion", side_effect=_raw_wrapper(router, FakeCompletion([gone]))):
+                router.score("sys", simple_prompt, build_payload(2))
+
+        assert router.states["only"].disabled is True
+
+    def test_model_field_used_when_models_absent(self) -> None:
+        p = Provider.from_dict(
+            {"name": "x", "base_url": "https://x/v1", "api_key": "k", "model": "solo"}
+        )
+        assert p.model_list == ["solo"]
+
+    def test_models_string_normalized_to_list(self) -> None:
+        p = Provider.from_dict(
+            {"name": "x", "base_url": "https://x/v1", "api_key": "k", "models": " a , b "}
+        )
+        # строку можно писать через запятую — удобно для секрета
+        assert p.model_list == ["a", "b"]
+
+    def test_models_list_without_model_field(self) -> None:
+        p = Provider.from_dict(
+            {"name": "x", "base_url": "https://x/v1", "api_key": "k", "models": ["m1", "m2"]}
+        )
+        assert p.model_list == ["m1", "m2"]
+        assert p.model == "m1"
+        assert p.usable is True
+
+
 class TestStats:
     def test_stats_tracked(self) -> None:
         p1, p2 = make_provider("p1", 5), make_provider("p2", 5)

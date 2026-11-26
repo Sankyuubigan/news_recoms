@@ -28,23 +28,48 @@ class Provider:
     rpm_delay_sec: float = 3.0
     timeout_sec: float = 60.0
     json_mode: str = "json_object"  # json_object | json_schema | none
+    # Модели в порядке приоритета. Если пусто — используется единственная `model`.
+    # Нужно для фолбэка, когда модель устарела/выпилена у провайдера, а ключ жив.
+    models: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Provider":
+        raw_models = d.get("models")
+        models: list[str] = []
+        if isinstance(raw_models, list):
+            models = [str(m).strip() for m in raw_models if str(m).strip()]
+        elif isinstance(raw_models, str) and raw_models.strip():
+            # Строкой удобно писать в секрете: "gemini-2.5-flash, gemini-2.5-flash-lite"
+            models = [m.strip() for m in raw_models.split(",") if m.strip()]
+
+        single = str(d.get("model") or "").strip()
+        # `model` — это первая модель, если `models` не задан явно
+        if single and single not in models:
+            models.insert(0, single)
+
         return cls(
-            name=str(d.get("name") or d.get("model") or "provider"),
+            name=str(d.get("name") or single or "provider"),
             base_url=str(d.get("base_url") or ""),
             api_key=str(d.get("api_key") or ""),
-            model=str(d.get("model") or ""),
+            model=single or (models[0] if models else ""),
             max_batch_size=int(d.get("max_batch_size") or 8),
             rpm_delay_sec=float(d.get("rpm_delay_sec") or 3.0),
             timeout_sec=float(d.get("timeout_sec") or 60.0),
             json_mode=str(d.get("json_mode") or "none"),
+            models=models,
         )
 
     @property
+    def model_list(self) -> list[str]:
+        """Модели в порядке приоритета (никогда не пустой, если модель задана)."""
+        ordered = [m for m in self.models if m]
+        if ordered:
+            return ordered
+        return [self.model] if self.model else []
+
+    @property
     def usable(self) -> bool:
-        return bool(self.base_url and self.api_key and self.model)
+        return bool(self.base_url and self.api_key and self.model_list)
 
 
 @dataclass
@@ -55,6 +80,7 @@ class ProviderState:
     err: int = 0
     last_call: float = 0.0
     dynamic_cap: int | None = None  # уменьшается при context-length ошибках
+    model_idx: int = 0  # текущая модель в Provider.model_list
 
     def available(self, now: float | None = None) -> bool:
         now = now if now is not None else time.monotonic()
@@ -124,7 +150,7 @@ def extract_json(raw: str) -> dict:
 
 
 def _classify_error(exc: Exception) -> str:
-    """Классифицирует ошибку: auth | rate | overload | context | bad_json | other."""
+    """Классифицирует ошибку: auth | rate | overload | context | model_gone | bad_json | other."""
     if isinstance(exc, ValueError):
         return "bad_json"
     if isinstance(exc, openai.AuthenticationError):
@@ -133,10 +159,16 @@ def _classify_error(exc: Exception) -> str:
         return "auth"
     if isinstance(exc, openai.RateLimitError):
         return "rate"
+    if isinstance(exc, openai.NotFoundError):
+        # Модель выпилена/переименована у провайдера — ключ при этом жив.
+        return "model_gone"
     if isinstance(exc, openai.BadRequestError):
         msg = str(exc).lower()
         if "context" in msg or "too long" in msg or "maximum" in msg:
             return "context"
+        # 400 вида "model not found" / "unsupported model" / "decommissioned"
+        if "model" in msg and ("not found" in msg or "unsupported" in msg or "does not exist" in msg or "decommission" in msg):
+            return "model_gone"
         return "other"
     if isinstance(exc, openai.APIStatusError):
         status = getattr(exc, "status_code", 0) or 0
@@ -279,10 +311,35 @@ class LLMRouter:
         elif kind == "context":
             # провайдер жив — просто батч слишком большой, cap ужимается отдельно
             pass
+        elif kind == "model_gone":
+            # Ключ жив, модель — нет. Переключаемся на следующую модель этого же
+            # провайдера; если модели кончились — провайдер выбывает до конца прогона.
+            if st.model_idx + 1 < len(provider.model_list):
+                st.model_idx += 1
+                log.warning(
+                    "provider %s: model %r unavailable, switching to %r",
+                    provider.name,
+                    provider.model_list[st.model_idx - 1],
+                    provider.model_list[st.model_idx],
+                )
+            else:
+                st.disabled = True
+                log.error(
+                    "provider %s: all models exhausted (%s), provider disabled",
+                    provider.name,
+                    ", ".join(provider.model_list),
+                )
         elif kind == "bad_json":
             st.cooldown_until = time.monotonic() + 5.0
         else:
             st.cooldown_until = time.monotonic() + 10.0
+
+    def _current_model(self, provider: Provider) -> str:
+        models = provider.model_list
+        if not models:
+            return provider.model
+        idx = min(self.states[provider.name].model_idx, len(models) - 1)
+        return models[idx]
 
     def _client(self, provider: Provider) -> OpenAI:
         if provider.name not in self._clients:
@@ -307,7 +364,7 @@ class LLMRouter:
         client = self._client(provider)
 
         kwargs: dict[str, Any] = {
-            "model": provider.model,
+            "model": self._current_model(provider),
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
