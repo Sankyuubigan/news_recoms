@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 import openai
@@ -109,7 +111,7 @@ class Provider:
         return cls(
             name=str(d.get("name") or single or "provider").strip(),
             base_url=str(d.get("base_url") or "").strip(),
-            api_key=str(d.get("api_key") or "").strip(),
+            api_key=_resolve_api_key(d),
             model=single or (models[0] if models else ""),
             max_batch_size=_int_or(d.get("max_batch_size"), 8),
             rpm_delay_sec=_float_or(d.get("rpm_delay_sec"), 3.0),
@@ -140,6 +142,23 @@ class Provider:
     def label(self) -> str:
         """Человекочитаемое имя для логов и errors[] — без утечки ключа."""
         return f"{self.name} ({self.key_fp})"
+
+
+def _resolve_api_key(d: dict) -> str:
+    """Ключ из `api_key` или из переменной окружения, названной в `api_key_env`.
+
+    Второй вариант — основной для GitHub Actions: структура провайдеров лежит
+    открытым файлом в репозитории (её правят в веб-интерфейсе), а сами ключи
+    остаются в Secrets короткими значениями по одному на провайдера.
+    """
+    direct = str(d.get("api_key") or "").strip()
+    if direct:
+        return direct
+
+    env_name = str(d.get("api_key_env") or "").strip()
+    if not env_name:
+        return ""
+    return os.environ.get(env_name, "").strip()
 
 
 def _int_or(value: Any, default: int) -> int:
@@ -329,8 +348,25 @@ def validate_providers_json(raw_json: str) -> list[Problem]:
             )
 
         api_key = str(entry.get("api_key") or "").strip()
-        if not api_key:
-            err(f"{pos}: пустой api_key — вставь ключ провайдера")
+        env_name = str(entry.get("api_key_env") or "").strip()
+
+        if not api_key and not env_name:
+            err(
+                f"{pos}: нет ключа — укажи \"api_key\": \"...\" напрямую или "
+                f"\"api_key_env\": \"ИМЯ_СЕКРЕТА\", чтобы ключ брался из переменной окружения"
+            )
+        elif env_name:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env_name):
+                err(
+                    f"{pos}: api_key_env «{env_name}» — недопустимое имя переменной "
+                    f"(латиница, цифры и _, не начинается с цифры)"
+                )
+            elif not os.environ.get(env_name, "").strip():
+                err(
+                    f"{pos}: api_key_env указывает на «{env_name}», но такая переменная "
+                    f"окружения пуста или не задана — добавь секрет с этим именем "
+                    f"(Settings → Secrets and variables → Actions)"
+                )
         elif _looks_like_placeholder(api_key):
             err(
                 f"{pos}: api_key похож на заготовку из .env.example («{api_key[:24]}») — "
@@ -387,6 +423,13 @@ def validate_providers_json(raw_json: str) -> list[Problem]:
                     f"{pos}: такой api_key уже используется другим провайдером — "
                     f"один ключ не даст дополнительной квоты; дублируй только если хочешь "
                     f"разные модели/лимиты на одном ключе"
+                )
+        if env_name:
+            seen_keys[f"env:{env_name}"] = seen_keys.get(f"env:{env_name}", 0) + 1
+            if seen_keys[f"env:{env_name}"] == 2:
+                warn(
+                    f"{pos}: api_key_env «{env_name}» уже указан у другого провайдера — "
+                    f"это один и тот же ключ, дополнительной квоты не будет"
                 )
 
     return problems
@@ -816,26 +859,61 @@ class LLMRouter:
         return self.score_posts(system_prompt, build_user_prompt, posts_payload)
 
 
-def build_router_from_json(raw_json: str, disabled: dict[str, dict] | None = None) -> LLMRouter:
-    """Строит роутер из секрета LLM_PROVIDERS_JSON.
+PROVIDERS_FILE = "providers.json"
 
-    Ошибки конфигурации собираются ВСЕ сразу и попадают в текст ValueError —
+
+def load_providers_raw(raw_json: str, providers_file: str | Path | None = None) -> tuple[str, str]:
+    """Возвращает (сырой конфиг, откуда он взялся).
+
+    Приоритет:
+      1. LLM_PROVIDERS_JSON из окружения — если задан и непустой (старый способ);
+      2. файл providers.json — обычный файл в репозитории, его правят в веб-интерфейсе
+         GitHub как любой текст, а ключи подставляются из переменных по api_key_env.
+
+    Второй способ основной: секреты остаются секретами (по одному короткому
+    значению на провайдера), а структура провайдеров живёт в git и ревьюится.
+    """
+    env_raw = (raw_json or "").strip()
+    if env_raw and env_raw not in ("[]", "null"):
+        return env_raw, "LLM_PROVIDERS_JSON (env)"
+
+    path = Path(providers_file) if providers_file else Path(__file__).resolve().parent.parent / PROVIDERS_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        # Файла нет — пусть валидатор скажет, что конфигурации нет вообще.
+        return "", f"{PROVIDERS_FILE} (не найден: {path})"
+    return text, str(path)
+
+
+def build_router_from_json(
+    raw_json: str,
+    disabled: dict[str, dict] | None = None,
+    providers_file: str | Path | None = None,
+) -> LLMRouter:
+    """Строит роутер из конфига провайдеров.
+
+    Источник: `LLM_PROVIDERS_JSON` из окружения, иначе файл `providers.json`
+    (см. load_providers_raw). Ошибки конфигурации собираются ВСЕ сразу —
     человек должен за один прогон увидеть все проблемы, а не по одной за запуск.
 
-    `disabled` — состояние из config.json (config.json → settings.disabled_providers_snapshot),
+    `disabled` — состояние из config.json (settings.disabled_providers),
     чтобы ключ, умерший от 401, не тратил запрос в следующем прогоне.
     """
-    problems = validate_providers_json(raw_json)
+    raw, source = load_providers_raw(raw_json, providers_file)
+    log.info("LLM config source: %s", source)
+
+    problems = validate_providers_json(raw)
 
     errors = [p.message for p in problems if p.is_error]
     warnings = [p.message for p in problems if not p.is_error]
     for w in warnings:
-        log.warning("LLM_PROVIDERS_JSON: %s", w)
+        log.warning("LLM config: %s", w)
 
     if errors:
         raise ProvidersConfigError(errors)
 
-    data = json.loads(raw_json)
+    data = json.loads(raw)
     providers = [Provider.from_dict(d) for d in data if isinstance(d, dict)]
 
     usable = [p for p in providers if p.usable]
@@ -843,7 +921,7 @@ def build_router_from_json(raw_json: str, disabled: dict[str, dict] | None = Non
         raise ProvidersConfigError(
             [
                 "ни одного рабочего провайдера — все отфильтрованы "
-                "(нужны одновременно base_url, api_key и model/models)"
+                "(нужны одновременно base_url, ключ (api_key или api_key_env) и model/models)"
             ]
         )
 

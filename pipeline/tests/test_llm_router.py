@@ -499,7 +499,9 @@ class TestValidateProvidersJson:
         assert validate_providers_json(json.dumps([make_good_config()])) == []
 
     def test_missing_api_key(self) -> None:
-        assert any("пустой api_key" in p for p in self._errors(json.dumps([make_good_config(api_key="")])))
+        errors = self._errors(json.dumps([make_good_config(api_key="")]))
+        assert any("нет ключа" in p for p in errors)
+        assert any("api_key_env" in p for p in errors)
 
     def test_placeholder_api_key_detected(self) -> None:
         errors = self._errors(json.dumps([make_good_config(api_key="YOUR_GEMINI_KEY_1")]))
@@ -661,6 +663,122 @@ class TestDisabledPersistence:
     def test_snapshot_empty_when_all_alive(self) -> None:
         router = LLMRouter([make_provider("a", 5)])
         assert router.disabled_snapshot() == []
+
+
+class TestApiKeyEnv:
+    """Ключи из переменных окружения: структура в git, секреты — в Secrets."""
+
+    def test_key_resolved_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GEMINI_KEY_1", "AIzaRealKeyFromSecret")
+        cfg = make_good_config()
+        del cfg["api_key"]
+        cfg["api_key_env"] = "GEMINI_KEY_1"
+
+        p = Provider.from_dict(cfg)
+        assert p.api_key == "AIzaRealKeyFromSecret"
+        assert p.usable is True
+
+    def test_direct_api_key_wins_over_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GEMINI_KEY_1", "from-env")
+        p = Provider.from_dict(make_good_config(api_key="from-field", api_key_env="GEMINI_KEY_1"))
+        assert p.api_key == "from-field"
+
+    def test_missing_env_is_reported_at_startup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("GEMINI_KEY_1", raising=False)
+        cfg = make_good_config()
+        del cfg["api_key"]
+        cfg["api_key_env"] = "GEMINI_KEY_1"
+
+        errors = [p.message for p in validate_providers_json(json.dumps([cfg])) if p.is_error]
+        assert len(errors) == 1
+        assert "GEMINI_KEY_1" in errors[0]
+        assert "пуста или не задана" in errors[0]
+
+    def test_empty_env_is_reported(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GROQ_KEY", "   ")
+        cfg = make_good_config()
+        del cfg["api_key"]
+        cfg["api_key_env"] = "GROQ_KEY"
+
+        errors = [p.message for p in validate_providers_json(json.dumps([cfg])) if p.is_error]
+        assert any("пуста или не задана" in e for e in errors)
+
+    def test_bad_env_name_is_reported(self) -> None:
+        cfg = make_good_config()
+        del cfg["api_key"]
+        cfg["api_key_env"] = "MY-KEY-1"  # дефисы недопустимы в именах переменных
+
+        errors = [p.message for p in validate_providers_json(json.dumps([cfg])) if p.is_error]
+        assert any("недопустимое имя переменной" in e for e in errors)
+
+    def test_env_key_is_valid_and_usable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GEMINI_KEY_1", "AIzaRealKeyFromSecret")
+        cfg = make_good_config()
+        del cfg["api_key"]
+        cfg["api_key_env"] = "GEMINI_KEY_1"
+
+        router = build_router_from_json(json.dumps([cfg]))
+        assert router.providers[0].api_key == "AIzaRealKeyFromSecret"
+
+    def test_duplicate_env_name_is_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GEMINI_KEY_1", "k")
+        a = make_good_config(name="a")
+        del a["api_key"]
+        a["api_key_env"] = "GEMINI_KEY_1"
+        b = make_good_config(name="b")
+        del b["api_key"]
+        b["api_key_env"] = "GEMINI_KEY_1"
+
+        problems = validate_providers_json(json.dumps([a, b]))
+        assert not any(p.is_error for p in problems)
+        assert any("уже указан у другого провайдера" in p.message for p in problems)
+
+
+class TestProvidersFile:
+    """Конфиг может лежать файлом в репозитории — его правят в веб-интерфейсе GitHub."""
+
+    def test_env_takes_priority(self, tmp_path) -> None:
+        from llm.router import load_providers_raw
+
+        f = tmp_path / "providers.json"
+        f.write_text('[{"name":"from-file"}]', encoding="utf-8")
+
+        raw, source = load_providers_raw('[{"name":"from-env"}]', str(f))
+        assert "from-env" in raw
+        assert "env" in source
+
+    def test_file_used_when_env_empty(self, tmp_path) -> None:
+        from llm.router import load_providers_raw
+
+        f = tmp_path / "providers.json"
+        f.write_text('[{"name":"from-file"}]', encoding="utf-8")
+
+        raw, source = load_providers_raw("", str(f))
+        assert "from-file" in raw
+        assert "providers.json" in source
+
+    def test_missing_file_returns_empty(self, tmp_path) -> None:
+        from llm.router import load_providers_raw
+
+        raw, source = load_providers_raw("", str(tmp_path / "nope.json"))
+        assert raw == ""
+        assert "не найден" in source
+
+    def test_repo_providers_file_is_valid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Настоящий pipeline/providers.json должен быть валиден при заданных ключах."""
+        from pathlib import Path
+
+        monkeypatch.setenv("GEMINI_KEY_1", "k1")
+        monkeypatch.setenv("GEMINI_KEY_2", "k2")
+        monkeypatch.setenv("GROQ_KEY", "k3")
+        monkeypatch.setenv("OPENROUTER_KEY", "k4")
+
+        path = Path(__file__).resolve().parent.parent / "providers.json"
+        router = build_router_from_json("", providers_file=str(path))
+        assert len(router.providers) == 4
+        names = [p.name for p in router.providers]
+        assert names == ["gemini-flash-primary", "gemini-flash-account-2", "groq-gpt-oss", "openrouter-free"]
+        assert router.providers[0].model_list == ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
 
 
 class TestStats:

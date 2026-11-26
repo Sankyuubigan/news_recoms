@@ -1,7 +1,7 @@
-"""Проверка LLM_PROVIDERS_JSON без запуска пайплайна.
+"""Проверка конфига LLM-провайдеров без запуска пайплайна.
 
-    python check_llm.py                 # берёт LLM_PROVIDERS_JSON из env/.env
-    python check_llm.py providers.json  # из файла
+    python check_llm.py                 # providers.json (или LLM_PROVIDERS_JSON)
+    python check_llm.py providers.json  # из конкретного файла
     echo "$JSON" | python check_llm.py -   # из stdin
 
 Коды возврата: 0 — всё ок (возможны предупреждения), 1 — есть ошибки.
@@ -9,34 +9,36 @@
 """
 from __future__ import annotations
 
-import json
 import sys
 
 from config import get_settings
 from llm.router import (
     ProvidersConfigError,
     build_router_from_json,
-    key_fingerprint,
+    load_providers_raw,
     validate_providers_json,
 )
 
 
-def _read_raw(argv: list[str]) -> str:
-    if not argv or argv[0] == "-":
-        if argv:
-            return sys.stdin.read()
-        return get_settings().llm_providers_json
+def _read_raw(argv: list[str]) -> tuple[str, str]:
+    if not argv:
+        # Штатный путь: env LLM_PROVIDERS_JSON → pipeline/providers.json
+        return load_providers_raw(get_settings().llm_providers_json)
+    if argv[0] == "-":
+        return sys.stdin.read(), "stdin"
     with open(argv[0], "r", encoding="utf-8") as fh:
-        return fh.read()
+        return fh.read(), argv[0]
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        raw = _read_raw(argv)
+        raw, source = _read_raw(argv)
     except OSError as e:
         print(f"не удалось прочитать конфиг: {e}", file=sys.stderr)
         return 1
+
+    print(f"Источник конфига: {source}\n")
 
     problems = validate_providers_json(raw)
     errors = [p for p in problems if p.is_error]
@@ -60,10 +62,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"\nИтог: конфиг валиден, провайдеров: {len(router.providers)}")
-    print(f"{'#':<3} {'имя':<26} {'ключ':<14} {'модели':<44} батч")
+    print(f"{'#':<3} {'имя':<26} {'ключ':<14} {'модели':<46} батч")
     for i, p in enumerate(router.providers, 1):
         models = ", ".join(p.model_list)
-        print(f"{i:<3} {p.name[:26]:<26} {p.key_fp:<14} {models[:44]:<44} {p.max_batch_size}")
+        print(f"{i:<3} {p.name[:26]:<26} {p.key_fp:<14} {models[:46]:<46} {p.max_batch_size}")
         print(f"    {p.base_url}  json_mode={p.json_mode}  timeout={p.timeout_sec:g}s")
     return 0
 

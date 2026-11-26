@@ -9,7 +9,12 @@ from filters.ad_filter import AdFilter
 from filters.dedup import DedupIndex, content_hash, normalize_url
 from learner import run_learner
 from llm.prompts import SYSTEM_PROMPT, build_scoring_user_prompt
-from llm.router import AllProvidersFailed, ProvidersConfigError, build_router_from_json
+from llm.router import (
+    AllProvidersFailed,
+    ProvidersConfigError,
+    build_router_from_json,
+    load_providers_raw,
+)
 from llm.youtube_video import apply_deep_summary
 from models import IngestItem, RawPost, RunStats, SourceConfig
 from notifier import TelegramNotifier
@@ -171,7 +176,6 @@ def main(argv: list[str] | None = None) -> int:
             log.error("LLM is not configured: %s", e)
             stats.errors.append(f"llm not configured: {e}")
             llm_unconfigured = True
-
         if router is not None:
             try:
                 results = router.score(
