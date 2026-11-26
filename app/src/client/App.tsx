@@ -163,6 +163,10 @@ export default function App() {
       case "restore":
         patchItem(item.id, { status: "inbox", feedback: "like" });
         break;
+      case "dismiss":
+        // ИИ был прав — убираем из вкладки, не ставя лайк и не обучая на мусоре.
+        patchItem(item.id, { status: "archived" });
+        break;
       case "dislike": {
         setFeedback({ itemId: item.id, title: item.title_ru || item.title_orig, kind: "dislike" });
         patchItem(item.id, { feedback: "dislike", status: "archived" });
@@ -209,6 +213,13 @@ export default function App() {
 
   const archiveOlder = async () => {
     await api.bulk("archive_older_than", { days: 3 });
+    void loadFeed();
+  };
+
+  /** «Очистить мусор» — убирает всю вкладку «Мусор ИИ» из виду. */
+  const clearRejected = async () => {
+    const res = await api.bulk("purge_rejected_older_than", { days: 0 });
+    if (res.updated) setToast(`Убрано из мусора: ${res.updated}`);
     void loadFeed();
   };
 
@@ -293,6 +304,7 @@ export default function App() {
               categories={categories}
               query={query}
               tabLabel={TAB_LABEL[tab]}
+              isRejectedTab={tab === "rejected"}
               highlightedId={highlightedId}
               pendingAi={counts.pending_ai}
               onSortChange={setSort}
@@ -301,6 +313,7 @@ export default function App() {
               onAction={handleItemAction}
               onArchiveAll={archiveAll}
               onArchiveOlder={archiveOlder}
+              onClearRejected={clearRejected}
               onRefresh={refresh}
             />
           ) : (

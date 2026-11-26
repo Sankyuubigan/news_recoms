@@ -85,6 +85,10 @@ export const api = {
       const days = Number(payload.days ?? 3);
       return { ok: true, updated: store.bulkArchiveOlderThan(Number.isFinite(days) ? days : 3) };
     }
+    if (action === "purge_rejected_older_than") {
+      const days = Number(payload.days ?? 0);
+      return { ok: true, updated: store.bulkDismissRejected(Number.isFinite(days) ? days : 0) };
+    }
     return { ok: true, updated: 0 };
   },
 

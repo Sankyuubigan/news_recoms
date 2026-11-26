@@ -398,6 +398,27 @@ class FeedStore {
     return ids.length;
   }
 
+  /**
+   * Чистит «Мусор ИИ»: переводит отсечённое в `archived`.
+   *
+   * Почему `archived`, а не удаление из файла: `user_state.json` — это
+   * оверлей действий пользователя, физически удалять оттуда записи значит
+   * ломать синхронизацию (другой клиент вернёт их обратно). Пайплайн сам
+   * вычистит `rejected` через REJECTED_TTL_DAYS = 7.
+   */
+  bulkDismissRejected(olderThanDays = 0): number {
+    const cutoff = Date.now() - olderThanDays * 86400_000;
+    const ids = this.getMerged()
+      .filter((it) => {
+        if (it.status !== "rejected") return false;
+        if (olderThanDays <= 0) return true;
+        return new Date(it.published_at).getTime() < cutoff;
+      })
+      .map((it) => it.id);
+    if (ids.length) this.bulkArchive(ids);
+    return ids.length;
+  }
+
   /** Сохраняет источники/настройки в config.json (с debounce и обработкой 409). */
   saveConfig(next: DataConfig): void {
     this.config = { ...next, updated_at: nowIso() };

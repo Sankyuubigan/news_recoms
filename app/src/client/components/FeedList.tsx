@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Archive, ArrowDownWideNarrow, Flame, Loader2, RefreshCw, Search, Sparkles } from "lucide-react";
+import { Archive, ArrowDownWideNarrow, Flame, Loader2, RefreshCw, Search, Sparkles, Trash2 } from "lucide-react";
 import type { FeedItem } from "../api/client";
 import ItemCard, { type ItemAction } from "./ItemCard";
 
@@ -11,6 +11,8 @@ interface Props {
   categories: string[];
   query: string;
   tabLabel: string;
+  /** На вкладке мусора набор кнопок другой: там не «просмотрено», а «очистить». */
+  isRejectedTab: boolean;
   highlightedId: string | null;
   /** Сколько постов собрано, но ещё не прогнано через LLM. */
   pendingAi: number;
@@ -20,6 +22,8 @@ interface Props {
   onAction: (item: FeedItem, action: ItemAction) => void;
   onArchiveAll: () => void;
   onArchiveOlder: () => void;
+  /** Есть только на вкладке «Мусор ИИ»: убрать всё отсечённое из виду. */
+  onClearRejected: () => void;
   onRefresh: () => void;
 }
 
@@ -31,6 +35,7 @@ export default function FeedList({
   categories,
   query,
   tabLabel,
+  isRejectedTab,
   highlightedId,
   pendingAi,
   onSortChange,
@@ -39,6 +44,7 @@ export default function FeedList({
   onAction,
   onArchiveAll,
   onArchiveOlder,
+  onClearRejected,
   onRefresh,
 }: Props) {
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -83,14 +89,25 @@ export default function FeedList({
               <ArrowDownWideNarrow className="h-3.5 w-3.5" />
               <span className="hidden md:inline">Старше 3 дней</span>
             </button>
-            <button
-              onClick={onArchiveAll}
-              className="flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-[12px] text-slate-400 transition hover:bg-ink-850 hover:text-slate-200"
-              title="Отметить все показанные просмотренными"
-            >
-              <Archive className="h-3.5 w-3.5" />
-              <span className="hidden md:inline">Всё просмотрено</span>
-            </button>
+            {isRejectedTab ? (
+              <button
+                onClick={onClearRejected}
+                className="flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-[12px] text-slate-400 transition hover:bg-rose-500/10 hover:text-rose-300"
+                title="Убрать весь мусор из виду (пайплайн сам удалит его через 7 дней)"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span className="hidden md:inline">Очистить мусор</span>
+              </button>
+            ) : (
+              <button
+                onClick={onArchiveAll}
+                className="flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-[12px] text-slate-400 transition hover:bg-ink-850 hover:text-slate-200"
+                title="Отметить все показанные просмотренными"
+              >
+                <Archive className="h-3.5 w-3.5" />
+                <span className="hidden md:inline">Всё просмотрено</span>
+              </button>
+            )}
           </div>
         </div>
 

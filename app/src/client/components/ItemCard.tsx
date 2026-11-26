@@ -1,9 +1,17 @@
-import { Check, ExternalLink, Plus, ThumbsDown, ThumbsUp, Bookmark } from "lucide-react";
+import { Check, ExternalLink, Plus, ThumbsDown, ThumbsUp, Bookmark, Trash2 } from "lucide-react";
 import type { FeedItem } from "../api/client";
 import { isEnglish, relativeTime, scoreStyle, sourceLabel, sourceTint } from "../utils";
 import { useSwipe } from "../hooks/useSwipe";
 
-export type ItemAction = "archive" | "save" | "like" | "dislike" | "open" | "restore";
+export type ItemAction =
+  | "archive"
+  | "save"
+  | "like"
+  | "dislike"
+  | "open"
+  | "restore"
+  /** Убрать из «Мусора ИИ», не спасая в ленту: ИИ был прав, просто чистим вкладку. */
+  | "dismiss";
 
 interface Props {
   item: FeedItem;
@@ -155,14 +163,26 @@ export default function ItemCard({ item, highlighted, onAction }: Props) {
         {/* Actions */}
         <div className="mt-3.5 flex items-center gap-1.5 border-t border-ink-800 pt-3">
           {isRejected ? (
-            <button
-              onClick={() => onAction("restore")}
-              className="flex items-center gap-1.5 rounded-lg bg-emerald-500/10 px-3 py-2 text-[12.5px] font-medium text-emerald-300 transition hover:bg-emerald-500/20"
-              title="Спасти пост обратно в ленту и обучить ИИ"
-            >
-              <ThumbsUp className="h-4 w-4" />
-              В ленту
-            </button>
+            <>
+              {/* Главное действие вкладки — спасти ложно отсечённое. */}
+              <button
+                onClick={() => onAction("restore")}
+                className="flex items-center gap-1.5 rounded-lg bg-emerald-500/10 px-3 py-2 text-[12.5px] font-medium text-emerald-300 transition hover:bg-emerald-500/20"
+                title="Спасти пост обратно в ленту и обучить ИИ"
+              >
+                <ThumbsUp className="h-4 w-4" />
+                В ленту
+              </button>
+              {/* ИИ был прав — просто убираем из вкладки, не трогая обучение. */}
+              <button
+                onClick={() => onAction("dismiss")}
+                className="flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-[12.5px] text-slate-400 transition hover:bg-ink-800 hover:text-slate-200"
+                title="Убрать из мусора, не возвращая в ленту"
+              >
+                <Trash2 className="h-4 w-4" />
+                <span className="hidden sm:inline">Убрать</span>
+              </button>
+            </>
           ) : (
             <>
               <button
