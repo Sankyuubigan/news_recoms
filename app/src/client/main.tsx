@@ -9,8 +9,10 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
   </React.StrictMode>,
 );
 
+// Регистрируем SW относительно текущего пути — работает на GitHub Pages по любому подпути
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    const swUrl = new URL("sw.js", window.location.href).toString();
+    navigator.serviceWorker.register(swUrl).catch(() => undefined);
   });
 }

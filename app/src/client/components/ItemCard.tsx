@@ -21,6 +21,7 @@ export default function ItemCard({ item, highlighted, onAction }: Props) {
   const inInbox = item.status === "inbox";
   const isSaved = item.status === "saved";
   const isRejected = item.status === "rejected";
+  void inInbox;
 
   return (
     <div className="relative">

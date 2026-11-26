@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import argparse
 import os
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_DATA_DIR = "../data_repo"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # --- Worker API ---
-    worker_base_url: str = Field(default="", alias="WORKER_BASE_URL")
-    ingest_secret: str = Field(default="", alias="INGEST_SECRET")
+    # --- Хранилище (ветка `data`, чекаутится в локальную папку) ---
+    data_dir: str = Field(default=DEFAULT_DATA_DIR, alias="DATA_DIR")
 
     # --- LLM providers (JSON array, см. .env.example) ---
     llm_providers_json: str = Field(default="[]", alias="LLM_PROVIDERS_JSON")
@@ -32,8 +35,31 @@ class Settings(BaseSettings):
     dry_run: bool = Field(default=False, alias="DRY_RUN")
 
     @property
-    def api_base(self) -> str:
-        return self.worker_base_url.rstrip("/")
+    def data_path(self) -> Path:
+        return Path(self.data_dir).expanduser().resolve()
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="NewsRecoms ingest pipeline")
+    parser.add_argument(
+        "--data-dir",
+        default=None,
+        help=f"Каталог с feed.json / user_state.json / config.json / runs.json (по умолчанию {DEFAULT_DATA_DIR})",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Ничего не писать в файлы (только лог)",
+    )
+    return parser.parse_args(argv)
+
+
+def apply_args(args: argparse.Namespace) -> None:
+    """Переносит CLI-аргументы в переменные окружения, чтобы их подхватил Settings."""
+    if args.data_dir:
+        os.environ["DATA_DIR"] = str(args.data_dir)
+    if getattr(args, "dry_run", False):
+        os.environ["DRY_RUN"] = "true"
 
 
 @lru_cache(maxsize=1)

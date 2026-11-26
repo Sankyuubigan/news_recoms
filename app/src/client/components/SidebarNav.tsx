@@ -1,4 +1,4 @@
-import { Bookmark, CheckCircle2, Flame, LogOut, Settings, Trash2 } from "lucide-react";
+import { Bookmark, CheckCircle2, Flame, KeyRound, Settings, Trash2 } from "lucide-react";
 
 export type Tab = "inbox" | "saved" | "archived" | "rejected" | "settings";
 
@@ -6,7 +6,8 @@ interface Props {
   tab: Tab;
   counts: { inbox: number; saved: number; archived: number; rejected: number };
   onChange: (tab: Tab) => void;
-  onLogout: () => void;
+  onOpenSync: () => void;
+  synced: boolean;
 }
 
 const ITEMS: Array<{ id: Tab; label: string; short: string; icon: typeof Flame; countKey?: keyof Props["counts"] }> = [
@@ -17,7 +18,7 @@ const ITEMS: Array<{ id: Tab; label: string; short: string; icon: typeof Flame; 
   { id: "settings", label: "Настройки", short: "Настройки", icon: Settings },
 ];
 
-export default function SidebarNav({ tab, counts, onChange, onLogout }: Props) {
+export default function SidebarNav({ tab, counts, onChange, onOpenSync, synced }: Props) {
   return (
     <>
       {/* Desktop sidebar */}
@@ -38,9 +39,7 @@ export default function SidebarNav({ tab, counts, onChange, onLogout }: Props) {
                 key={id}
                 onClick={() => onChange(id)}
                 className={`group flex items-center gap-3 rounded-lg px-3 py-2.5 text-[14px] transition ${
-                  active
-                    ? "bg-ink-800 text-white"
-                    : "text-slate-400 hover:bg-ink-850 hover:text-slate-200"
+                  active ? "bg-ink-800 text-white" : "text-slate-400 hover:bg-ink-850 hover:text-slate-200"
                 }`}
               >
                 <Icon className={`h-4 w-4 ${active ? "text-emerald-400" : "text-slate-500"}`} />
@@ -61,11 +60,14 @@ export default function SidebarNav({ tab, counts, onChange, onLogout }: Props) {
 
         <div className="mt-auto pt-4">
           <button
-            onClick={onLogout}
-            className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-[14px] text-slate-500 transition hover:bg-ink-850 hover:text-slate-300"
+            onClick={onOpenSync}
+            className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-[14px] transition hover:bg-ink-850 ${
+              synced ? "text-emerald-400/80 hover:text-emerald-300" : "text-slate-500 hover:text-slate-300"
+            }`}
+            title={synced ? "Синхронизация подключена" : "Подключить синхронизацию"}
           >
-            <LogOut className="h-4 w-4" />
-            Выйти
+            <KeyRound className="h-4 w-4" />
+            {synced ? "Синхронизация" : "Подключить"}
           </button>
         </div>
       </aside>

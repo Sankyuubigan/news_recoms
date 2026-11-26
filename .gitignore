@@ -1,18 +1,21 @@
 node_modules/
 dist/
-.wrangler/
-.dev.vars
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
 venv/
 .env
+.env.local
 *.log
 .DS_Store
 .idea/
 .vscode/
 
+# Локальный чекаут ветки data (для отладки пайплайна)
+data_repo/
+
 # Сессионные файлы агента и экспорт чата — не часть проекта
 tasks/
 Бесплатный AI Агрегатор Контента.md
+.codemap/

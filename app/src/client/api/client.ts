@@ -1,136 +1,38 @@
-export interface FeedItem {
-  id: number;
-  source_id: number;
-  external_id: string | null;
-  url: string;
-  content_hash: string;
-  content_type: "telegram" | "article" | "youtube";
-  original_lang: string | null;
-  title_orig: string;
-  content_orig: string;
-  media_url: string | null;
-  title_ru: string | null;
-  summary_ru: string | null;
-  category: string | null;
-  ai_score: number | null;
-  ai_reason: string | null;
-  is_ad: number;
-  ad_reason: string | null;
-  cluster_slug: string | null;
-  status: "pending_ai" | "inbox" | "saved" | "archived" | "rejected";
-  feedback: "none" | "like" | "dislike";
-  feedback_reason: string | null;
-  feedback_processed: number;
-  published_at: string;
-  fetched_at: string;
-  updated_at: string;
-  key_points: string[];
-  tags: string[];
-  merged_sources: Array<{ name: string; url: string }>;
-  source_name: string;
-  source_type: "telegram" | "rss" | "youtube";
-}
+/**
+ * Публичный фасад данных для компонентов.
+ * Работает поверх `store` (GitHub-ветка `data`) и сохраняет прежние сигнатуры.
+ */
 
-export interface FeedResponse {
-  items: FeedItem[];
-  total: number;
-  counts: { inbox: number; saved: number; archived: number; rejected: number };
-  categories: string[];
-}
+import { dispatchIngest, getRepo, getToken, type RepoRef } from "./github";
+import { store, nowIso } from "./store";
+import type {
+  DataConfig,
+  FeedItem,
+  FeedResponse,
+  ItemStatus,
+  PipelineRun,
+  Source,
+  SourceType,
+  SyncStatus,
+} from "./types";
 
-export interface Source {
-  id: number;
-  type: "telegram" | "rss" | "youtube";
-  name: string;
-  identifier: string;
-  category_hint: string | null;
-  fetch_full_text: number;
-  enabled: number;
-  last_fetched_at: string | null;
-  last_error: string | null;
-  created_at: string;
-}
-
-export interface PipelineRun {
-  id: number;
-  started_at: string;
-  finished_at: string | null;
-  fetched_count: number;
-  ad_blocked_count: number;
-  dedup_skipped_count: number;
-  ai_processed_count: number;
-  inbox_added_count: number;
-  rejected_count: number;
-  pending_ai_count: number;
-  provider_stats: Record<string, { ok?: number; err?: number }>;
-  errors: unknown[];
-  status: "running" | "success" | "partial" | "failed";
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    credentials: "same-origin",
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
-    ...init,
-  });
-
-  if (res.status === 401) {
-    throw new UnauthorizedError();
-  }
-  if (!res.ok) {
-    let detail = "";
-    try {
-      detail = JSON.stringify(await res.json());
-    } catch {
-      detail = await res.text().catch(() => "");
-    }
-    throw new ApiError(res.status, detail);
-  }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
-}
-
-export class UnauthorizedError extends Error {
-  constructor() {
-    super("unauthorized");
-    this.name = "UnauthorizedError";
-  }
-}
-
-export class ApiError extends Error {
-  status: number;
-  detail: string;
-  constructor(status: number, detail: string) {
-    super(`API ${status}: ${detail}`);
-    this.name = "ApiError";
-    this.status = status;
-    this.detail = detail;
-  }
-}
+export type {
+  DataConfig,
+  FeedItem,
+  FeedResponse,
+  ItemStatus,
+  PipelineRun,
+  Source,
+  SourceType,
+  SyncStatus,
+};
+export { store, getRepo, getToken };
+export type { RepoRef };
 
 export const api = {
-  async login(password: string): Promise<void> {
-    await request<{ ok: boolean }>("/api/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ password }),
-    });
-  },
-  async logout(): Promise<void> {
-    await request<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
-  },
-  async me(): Promise<boolean> {
-    try {
-      const r = await request<{ authenticated: boolean }>("/api/auth/me");
-      return r.authenticated;
-    } catch {
-      return false;
-    }
-  },
+  // ---------------------------------------------------------------- чтение
 
-  feed(params: {
+  async feed(params: {
     status: string;
     sort: "score" | "date";
     category?: string;
@@ -138,52 +40,175 @@ export const api = {
     limit?: number;
     offset?: number;
   }): Promise<FeedResponse> {
-    const sp = new URLSearchParams({
-      status: params.status,
-      sort: params.sort,
-      limit: String(params.limit ?? 30),
-      offset: String(params.offset ?? 0),
-    });
-    if (params.category && params.category !== "Все") sp.set("category", params.category);
-    if (params.q) sp.set("q", params.q);
-    return request<FeedResponse>(`/api/v1/feed?${sp.toString()}`);
+    await store.load();
+    return store.getFeed(params);
   },
+
+  async sources(): Promise<{ sources: Source[] }> {
+    await store.load();
+    return { sources: store.getSources() };
+  },
+
+  async settings(): Promise<{ settings: Record<string, string> }> {
+    await store.load();
+    return { settings: store.getSettings() };
+  },
+
+  async runs(): Promise<{ runs: PipelineRun[] }> {
+    await store.load();
+    return { runs: store.getRuns() };
+  },
+
+  // --------------------------------------------------------------- действия
 
   patchItem(
-    id: number,
-    patch: { status?: string; feedback?: string; feedback_reason?: string | null },
-  ): Promise<{ ok: boolean; item: FeedItem }> {
-    return request(`/api/v1/items/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
+    id: string,
+    patch: { status?: ItemStatus; feedback?: string; feedback_reason?: string | null },
+  ): { ok: boolean; item: FeedItem | null } {
+    store.patchItem(id, patch);
+    return { ok: true, item: null };
   },
 
-  bulk(action: string, payload: Record<string, unknown>): Promise<{ ok: boolean }> {
-    return request(`/api/v1/items/bulk`, {
-      method: "POST",
-      body: JSON.stringify({ action, ...payload }),
+  bulk(action: string, payload: Record<string, unknown>): { ok: boolean; updated: number } {
+    if (action === "archive_ids") {
+      const ids = (payload.ids as string[] | undefined) ?? [];
+      store.bulkArchive(ids);
+      return { ok: true, updated: ids.length };
+    }
+    if (action === "archive_older_than") {
+      const days = Number(payload.days ?? 3);
+      return { ok: true, updated: store.bulkArchiveOlderThan(Number.isFinite(days) ? days : 3) };
+    }
+    return { ok: true, updated: 0 };
+  },
+
+  // --------------------------------------------------------------- источники
+
+  async createSource(body: {
+    type: SourceType;
+    identifier: string;
+    name?: string;
+    category_hint?: string;
+    fetch_full_text?: boolean;
+  }): Promise<{ ok: boolean; source: Source }> {
+    await store.load();
+    const config = store.getConfig();
+    if (!config) throw new Error("config.json не загружен — проверь репозиторий и ветку data");
+
+    const identifier = normalizeIdentifier(body.type, body.identifier);
+    if (!identifier) throw new Error("Пустой идентификатор источника");
+
+    if (config.sources.some((s) => s.identifier === identifier)) {
+      throw new Error("Такой источник уже добавлен");
+    }
+
+    const nextId = Math.max(config.next_source_id ?? 1, ...config.sources.map((s) => s.id + 1));
+    const source: Source = {
+      id: nextId,
+      type: body.type,
+      name: (body.name ?? "").trim() || identifier,
+      identifier,
+      category_hint: body.category_hint ?? "",
+      fetch_full_text: body.fetch_full_text ? 1 : 0,
+      enabled: 1,
+      last_fetched_at: null,
+      last_error: null,
+      created_at: nowIso(),
+    };
+
+    store.saveConfig({
+      ...config,
+      next_source_id: nextId + 1,
+      sources: [...config.sources, source],
     });
+    return { ok: true, source };
   },
 
-  sources(): Promise<{ sources: Source[] }> {
-    return request(`/api/v1/sources`);
-  },
-  createSource(body: Record<string, unknown>): Promise<{ ok: boolean; source: Source }> {
-    return request(`/api/v1/sources`, { method: "POST", body: JSON.stringify(body) });
-  },
-  patchSource(id: number, body: Record<string, unknown>): Promise<{ ok: boolean; source: Source }> {
-    return request(`/api/v1/sources/${id}`, { method: "PATCH", body: JSON.stringify(body) });
-  },
-  deleteSource(id: number): Promise<{ ok: boolean }> {
-    return request(`/api/v1/sources/${id}`, { method: "DELETE" });
+  async patchSource(id: number, body: Record<string, unknown>): Promise<{ ok: boolean }> {
+    await store.load();
+    const config = store.getConfig();
+    if (!config) throw new Error("config.json не загружен");
+
+    const sources = config.sources.map((s) => {
+      if (s.id !== id) return s;
+      const next: Source = { ...s };
+      if (body.name !== undefined) next.name = String(body.name).trim() || s.name;
+      if (body.identifier !== undefined) {
+        next.identifier = normalizeIdentifier(s.type, String(body.identifier));
+      }
+      if (body.category_hint !== undefined) next.category_hint = String(body.category_hint);
+      if (body.fetch_full_text !== undefined) next.fetch_full_text = body.fetch_full_text ? 1 : 0;
+      if (body.enabled !== undefined) next.enabled = body.enabled ? 1 : 0;
+      return next;
+    });
+
+    store.saveConfig({ ...config, sources });
+    return { ok: true };
   },
 
-  settings(): Promise<{ settings: Record<string, string> }> {
-    return request(`/api/v1/settings`);
-  },
-  saveSettings(body: Record<string, string>): Promise<{ ok: boolean }> {
-    return request(`/api/v1/settings`, { method: "PUT", body: JSON.stringify(body) });
+  async deleteSource(id: number): Promise<{ ok: boolean }> {
+    await store.load();
+    const config = store.getConfig();
+    if (!config) throw new Error("config.json не загружен");
+    store.saveConfig({ ...config, sources: config.sources.filter((s) => s.id !== id) });
+    return { ok: true };
   },
 
-  runs(): Promise<{ runs: PipelineRun[] }> {
-    return request(`/api/v1/runs`);
+  // ---------------------------------------------------------------- настройки
+
+  async saveSettings(body: Record<string, string>): Promise<{ ok: boolean }> {
+    await store.load();
+    const config = store.getConfig();
+    if (!config) throw new Error("config.json не загружен");
+    store.saveConfig({ ...config, settings: { ...config.settings, ...body } });
+    await store.flush();
+    return { ok: true };
+  },
+
+  // ------------------------------------------------------------- синхронизация
+
+  async connect(token: string): Promise<string> {
+    store.setCredentials(token, getRepo());
+    await store.load(true);
+    return store.getRepoLabel();
+  },
+
+  async disconnect(): Promise<void> {
+    store.setCredentials(null);
+  },
+
+  async runIngest(): Promise<void> {
+    const repo = getRepo();
+    const token = getToken();
+    if (!repo || !token) throw new Error("Сначала подключи синхронизацию");
+    await dispatchIngest(repo, token);
+  },
+
+  async refresh(): Promise<void> {
+    await store.load(true);
   },
 };
+
+// ------------------------------------------------------------- normalization
+
+/** Нормализует identifier по типу источника (та же логика, что была в worker/sources.ts). */
+export function normalizeIdentifier(type: SourceType, raw: string): string {
+  const v = (raw ?? "").trim();
+  if (type === "telegram") {
+    return v
+      .replace(/^https?:\/\/(www\.)?t\.me\//i, "")
+      .replace(/^@/, "")
+      .replace(/^s\//i, "")
+      .replace(/\/+$/, "")
+      .trim();
+  }
+  if (type === "youtube") {
+    const byChannel = /[?&]channel_id=([A-Za-z0-9_-]+)/.exec(v);
+    if (byChannel) return byChannel[1];
+    if (/^UC[A-Za-z0-9_-]{20,}$/.test(v)) return v;
+    const at = /@([A-Za-z0-9._-]+)/.exec(v);
+    if (at) return `@${at[1]}`;
+    return v;
+  }
+  return v;
+}

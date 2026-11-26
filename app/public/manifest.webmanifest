@@ -2,8 +2,8 @@
   "name": "NewsRecoms",
   "short_name": "NewsRecoms",
   "description": "Персональный AI-агрегатор новостей без мусора",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": "./",
+  "scope": "./",
   "display": "standalone",
   "orientation": "portrait-primary",
   "background_color": "#08090c",
@@ -11,7 +11,7 @@
   "lang": "ru",
   "icons": [
     {
-      "src": "/icon.svg",
+      "src": "./icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any"

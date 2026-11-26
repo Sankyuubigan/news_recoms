@@ -1,7 +1,11 @@
 # NewsRecoms
 
-Персональный AI-агрегатор контента: Telegram-каналы, RSS/сайты и YouTube → AI-фильтр мусора →
-чистая лента в PWA на телефоне и ПК. **Хостинг $0, карта не нужна.**
+Персональный AI-агрегатор новостей: Telegram-каналы, RSS/сайты и YouTube → AI-фильтр мусора →
+чистая лента в PWA на телефоне и ПК.
+
+**Всё живёт на GitHub и стоит $0.** Ни Cloudflare, ни серверов, ни карт — только репозиторий:
+GitHub Pages отдаёт сайт, GitHub Actions собирает новости по расписанию, а ветка `data` работает
+базой данных.
 
 - 🔥 **AI-скоринг 1–10** под твои правила + перевод + саммари + тезисы
 - 🚫 **Двухслойная резка рекламы**: regex до нейронки (erid, #реклама, ИНН) + детект нативной рекламы в LLM
@@ -9,110 +13,102 @@
 - 🧠 **Самообучение**: 👍/👎 → LLM переписывает профиль твоих интересов
 - 📥 **Inbox Zero**: Новое / Отложено / Архив / Мусор ИИ
 - 🔁 **Smart Failover**: Gemini → Groq → OpenRouter, с авто-дроблением батча
+- 📱 **Без пароля**: читаешь сразу; синхронизация подключается один раз токеном и QR-кодом
 
 ## Архитектура
 
 ```text
-[GitHub Actions — cron каждые 2 часа]
-   │  парсит t.me/s/*, RSS, YouTube RSS
-   │  Слой 1: regex-антиреклама + дедуп по URL/хэшу
-   │  Слой 2: LLM-роутер (скоринг, перевод, выжимка, кластеры)
-   │  Слой 3: обучение профиля по 👍/👎
-   │  Слой 4: алерты 9–10/10 в Telegram
-   ▼
-[Cloudflare Worker + D1]  ← единый деплой: API + статика PWA
-   ▲
-[React PWA] свайпы, горячие клавиши, установка на телефон
+┌──────────────────── GitHub ────────────────────┐
+│                                                │
+│  ветка main                     ветка data     │
+│  ├─ app/     (React PWA)        ├─ feed.json        ← пишет пайплайн
+│  ├─ pipeline/(Python)           ├─ user_state.json  ← пишет фронтенд
+│  └─ .github/workflows/          ├─ config.json      ← оба
+│                                 └─ runs.json        ← пишет пайплайн
+│                                                │
+│  Actions: ingest.yml (cron 2ч) → пушит в data  │
+│  Actions: deploy-pages.yml     → деплой на Pages│
+└────────────────────────────────────────────────┘
+        │                                │
+        ▼                                ▼
+  https://<ник>.github.io/<репо>/   GitHub REST API (чтение/запись JSON)
 ```
 
-Python **не ходит в D1 напрямую** — только через `/api/internal/*` с `Bearer INGEST_SECRET`.
+**Почему разделены файлы:** пайплайн пишет только `feed.json`, `runs.json` и `config.json→learned_profile`,
+фронтенд — только `user_state.json` (и `config.json`, когда меняешь источники/правила).
+Конфликтов записи практически нет, а если случится (409) — клиент перечитывает файл,
+мержит по `updated_at` и повторяет.
 
-## Быстрый старт
+## Быстрый старт — 5 шагов
 
-### 1. Клонируй и поставь зависимости
+### Шаг 1. Создай **публичный** репозиторий и запушь код
 
 ```bash
-git clone <твой-репозиторий> news_recoms && cd news_recoms
-cd app && npm install && cd ..
-cd pipeline && pip install -r requirements.txt && cd ..
+git clone <этот-репозиторий> news_recoms
+cd news_recoms
+git remote set-url origin https://github.com/<твой-ник>/<твой-репо>.git
+git push -u origin main
 ```
 
-### 2. Создай D1 базу
+> ⚠️ Репозиторий должен быть **публичным**: GitHub Pages на бесплатном плане не публикует сайты
+> из приватных репозиториев. Код открыт — это нормально, секретов в нём нет.
 
-```bash
-cd app
-npx wrangler login
-npx wrangler d1 create news_recoms-db
-```
+### Шаг 2. Включи GitHub Pages
 
-Скопируй выведенный `database_id` в `app/wrangler.jsonc` вместо `REPLACE_WITH_YOUR_D1_DATABASE_ID`.
+`Settings → Pages → Source: GitHub Actions`
 
-### 3. Примени миграции
+Больше ничего настраивать не нужно — workflow `Deploy Pages` сам соберёт и опубликует сайт
+при каждом пуше в `main`.
 
-```bash
-npx wrangler d1 migrations apply news_recoms-db --remote
-```
+### Шаг 3. Добавь ключ LLM
 
-### 4. Задай секреты Worker
+`Settings → Secrets and variables → Actions → New repository secret`
 
-```bash
-npx wrangler secret put APP_PASSWORD     # пароль для входа в PWA
-npx wrangler secret put SESSION_SECRET   # любая длинная случайная строка
-npx wrangler secret put INGEST_SECRET    # токен для пайплайна
-```
-
-Сгенерировать случайную строку:
-
-```bash
-openssl rand -hex 32
-```
-
-### 5. Задеплой
-
-```bash
-npm run build
-npx wrangler deploy
-```
-
-Получишь URL вида `https://news_recoms.<subdomain>.workers.dev` — открывай, вводи `APP_PASSWORD`,
-и добавляй на главный экран телефона (PWA).
-
-### 6. Настрой GitHub Actions
-
-Добавь в **Settings → Secrets and variables → Actions**:
-
-| Secret | Значение |
+| Имя | Значение |
 | :--- | :--- |
-| `WORKER_BASE_URL` | `https://news_recoms.<subdomain>.workers.dev` |
-| `INGEST_SECRET` | тот же, что в шаге 4 |
-| `LLM_PROVIDERS_JSON` | JSON-массив провайдеров (см. `.env.example`) |
-| `GEMINI_VIDEO_API_KEY` | опционально — для глубоких саммари YouTube |
-| `TELEGRAM_BOT_TOKEN` | опционально — алерты 9–10/10 |
-| `TELEGRAM_CHAT_ID` | опционально |
+| `LLM_PROVIDERS_JSON` | JSON-массив провайдеров — готовый пример в [`.env.example`](.env.example) |
+| `GEMINI_VIDEO_API_KEY` | *опционально* — глубокие саммари YouTube |
+| `TELEGRAM_BOT_TOKEN` | *опционально* — алерты для постов 9–10/10 |
+| `TELEGRAM_CHAT_ID` | *опционально* |
 
-Для авто-деплоя при пуше в `main` (workflow `deploy-app.yml`) добавь ещё:
+Минимум достаточно одного бесплатного ключа Gemini из [aistudio.google.com](https://aistudio.google.com).
+Ключи Groq и OpenRouter добавь как резерв — роутер сам переключится при лимитах.
 
-| Secret | Где взять |
-| :--- | :--- |
-| `CLOUDFLARE_API_TOKEN` | dash.cloudflare.com → My Profile → API Tokens → Create Token (шаблон «Edit Cloudflare Workers») |
-| `CLOUDFLARE_ACCOUNT_ID` | dash.cloudflare.com → Workers & Pages → правая панель |
+### Шаг 4. Запусти сбор вручную один раз
 
-### 7. Первый запуск
+`Actions → Ingest Pipeline → Run workflow`
 
-Actions → **Ingest Pipeline** → *Run workflow*. Через минуту в ленте появятся посты.
+Первый запуск сам создаст ветку `data`, инициализирует в ней 4 JSON-файла с дефолтными
+источниками и принесёт первые новости. Дальше он ходит по расписанию каждые 2 часа.
 
-## Где взять бесплатные ключи
+### Шаг 5. Открой сайт
 
-| Сервис | Ссылка | Что даёт |
-| :--- | :--- | :--- |
-| Google AI Studio | aistudio.google.com | Gemini Flash, 1M контекст, YouTube-видео |
-| GroqCloud | console.groq.com | Мгновенный резерв, 30 RPM |
-| OpenRouter | openrouter.ai | `:free` модели, третий эшелон |
-| Cloudflare | dash.cloudflare.com | Worker + D1, карта не нужна |
+`https://<твой-ник>.github.io/<твой-репо>/`
+
+Лента сразу работает — читать можно без всякой настройки.
+
+**Чтобы сохранять лайки и «Просмотрено»:**
+
+1. Создай Fine-Grained Token: [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new)
+   - Repository access → **Only select repositories** → выбери свой репозиторий
+   - Permissions → **Contents: Read and write**
+   - (по желанию) **Actions: Read and write** — чтобы работала кнопка «Запустить сбор» в UI
+2. На сайте: **Настройки → Синхронизация → вставь токен → Подключить**
+3. Нажми **QR для телефона** и отсканируй код камерой — телефон подключится автоматически
+
+> Токен хранится только в `localStorage` твоего браузера и никогда не уходит никуда, кроме
+> `api.github.com`. Данные пишутся в **твой** репозиторий.
+
+## Установка на телефон как приложение
+
+- **Android / Chrome:** меню ⋮ → «Установить приложение»
+- **iPhone / Safari:** «Поделиться» → «На экран „Домой“»
+
+Появится иконка, полноэкранный режим, нижняя навигация и свайпы.
 
 ## Как добавить источники
 
-В PWA → **Настройки → Источники**:
+**Настройки → Источники** (нужна подключённая синхронизация — изменения пишутся в `config.json`):
 
 - **Telegram** — `@channel` или `https://t.me/channel` (канал должен быть публичным)
 - **RSS** — полный URL фида. Тумблер `full` вытягивает полный текст через trafilatura
@@ -126,26 +122,53 @@ Actions → **Ingest Pipeline** → *Run workflow*. Через минуту в �
 
 На телефоне: свайп вправо — просмотрено, свайп влево — дизлайк.
 
+## Как это работает внутри
+
+1. **Сбор** — парсеры тянут посты из `t.me/s/*`, RSS и YouTube-фидов
+2. **Слой 1** — regex-антиреклама (erid, #реклама, ИНН, промокод, «запишись на вебинар») + дедуп
+   по нормализованному URL и SHA256 контента
+3. **Слой 2** — LLM-роутер: скоринг 1–10, перевод на русский, выжимка, тезисы, `cluster_slug` для
+   схлопывания сюжетов. При 429/503/401 провайдер уходит в cooldown, батч дробится
+4. **Запись** — результат уходит в `feed.json` ветки `data` (коммит `chore: ingest update`)
+5. **Обучение** — накопленные 👍/👎 (порог `learn_feedback_threshold`) переписывают `learned_profile`
+6. **Чистка** — `rejected` старше 7 дней и `archived` старше 30 дней удаляются, `saved` — **никогда**.
+   Файл всегда остаётся лёгким (лимит ~1000 элементов)
+
+## Где взять бесплатные ключи
+
+| Сервис | Ссылка | Что даёт |
+| :--- | :--- | :--- |
+| Google AI Studio | aistudio.google.com | Gemini Flash, 1M контекст, YouTube-видео |
+| GroqCloud | console.groq.com | Мгновенный резерв, 30 RPM |
+| OpenRouter | openrouter.ai | `:free` модели, третий эшелон |
+
 ## Локальная разработка
 
 ```bash
-# Worker API + статика
-cd app && npm run build && npm run preview     # http://127.0.0.1:8787
-
-# Фронтенд с HMR (проксирует /api на 8787)
-cd app && npm run dev                          # http://127.0.0.1:5173
+# Фронтенд с HMR
+cd app && npm install && npm run dev        # http://127.0.0.1:5173
 
 # Пайплайн
 cd pipeline
-cp ../.env.example .env    # заполни ключи
+cp ../.env.example .env                     # заполни LLM_PROVIDERS_JSON
 python -m pytest
-DRY_RUN=true python main.py
+DRY_RUN=true python main.py --data-dir ../data_repo
 ```
 
-Локальная D1:
+Для локального фронтенда задай в `app/.env.local`:
 
 ```bash
-cd app && npx wrangler d1 migrations apply news_recoms-db --local
+VITE_GITHUB_OWNER=твой-ник
+VITE_GITHUB_REPO=твой-репо
+```
+
+Иначе репозиторий определяется из `window.location.hostname` (для `*.github.io`).
+
+Посмотреть на данные локально, не трогая репозиторий:
+
+```bash
+git clone --branch data <репо> data_repo
+cd pipeline && DRY_RUN=true python main.py --data-dir ../data_repo
 ```
 
 ## Тесты
@@ -157,18 +180,26 @@ cd pipeline && python -m pytest
 
 Покрыто: regex-антиреклама (erid/#реклама/ИНН/промокод/битый regex), нормализация URL и хэши,
 парсинг `t.me/s/` на HTML-фикстуре, failover LLM (429/503/401), cooldown,
-**адаптивное дробление батча 30 → 8**.
+**адаптивное дробление батча 30 → 8**, файловое хранилище (мерж `user_state` → `feed`, дедуп,
+кластеры, чистка с сохранением `saved`, атомарная запись, roundtrip кириллицы).
 
 ## Структура
 
 ```text
 news_recoms/
-├── .github/workflows/     ingest.yml (cron) + deploy-app.yml (push в main)
-├── app/                   Cloudflare Worker (Hono) + React PWA
-│   ├── migrations/        0001_init.sql — схема D1
-│   └── src/worker/        auth (HMAC cookie), routes/{auth,feed,sources,settings,internal}
-│   └── src/client/        App, FeedList, ItemCard, SourcesManager, RulesAndProfile, PipelineLogs
-├── pipeline/              Python 3.12: парсеры, фильтры, LLM-роутер, learner, notifier
+├── .github/workflows/
+│   ├── ingest.yml           cron каждые 2 часа → пишет ветку data
+│   └── deploy-pages.yml     push в main → GitHub Pages
+├── app/                     React 19 + Vite + Tailwind PWA
+│   ├── public/              manifest, sw.js, иконка
+│   └── src/client/
+│       ├── api/             github.ts (REST), store.ts (мерж+debounce), client.ts
+│       └── components/      FeedList, ItemCard, SourcesManager, SyncModal, SyncSettings…
+├── pipeline/                Python 3.12
+│   ├── storage.py           Git-as-a-Database: 4 JSON-файла, атомарная запись
+│   ├── parsers/             telegram, rss, youtube
+│   ├── filters/             ad_filter, dedup
+│   └── llm/                 router (failover), prompts, youtube_video
 └── .env.example
 ```
 
@@ -179,3 +210,5 @@ news_recoms/
 - **Прокси не нужен:** GitHub Actions ходит с зарубежных IP, гео-блоки Gemini/Groq не мешают.
 - **pending_ai:** если легли все LLM — посты не теряются, дообрабатываются следующим кроном.
 - **Порог ленты** (`min_inbox_score`, по умолчанию 6.5) и **порог алерта** (9.0) правятся в UI.
+- **Лимит анонимного GitHub API** — 60 запросов/час. Приложение читает данные напрямую с
+  `raw.githubusercontent.com` (без лимита), а API использует только когда есть токен.

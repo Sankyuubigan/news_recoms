@@ -11,7 +11,7 @@ interface Props {
   categories: string[];
   query: string;
   tabLabel: string;
-  highlightedId: number | null;
+  highlightedId: string | null;
   onSortChange: (s: "score" | "date") => void;
   onCategoryChange: (c: string) => void;
   onQueryChange: (q: string) => void;
@@ -38,7 +38,7 @@ export default function FeedList({
   onArchiveOlder,
   onRefresh,
 }: Props) {
-  const cardRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   useEffect(() => {
     if (highlightedId == null) return;

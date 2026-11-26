@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { Undo2, X } from "lucide-react";
 
 export interface DislikeState {
-  itemId: number;
+  itemId: string;
   title: string;
 }
 

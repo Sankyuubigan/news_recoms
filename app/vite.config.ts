@@ -2,7 +2,10 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
 
+// base: "./" — относительные пути, чтобы сайт работал по любому адресу
+// https://<owner>.github.io/<repo>/ без привязки к имени репозитория.
 export default defineConfig({
+  base: "./",
   plugins: [react()],
   resolve: {
     alias: {
@@ -17,11 +20,5 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    proxy: {
-      "/api": {
-        target: "http://127.0.0.1:8787",
-        changeOrigin: true,
-      },
-    },
   },
 });

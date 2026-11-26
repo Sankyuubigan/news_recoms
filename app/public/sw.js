@@ -1,6 +1,8 @@
-/* NewsRecoms service worker — minimal offline shell */
-const CACHE = "pf-shell-v1";
-const SHELL = ["/", "/index.html", "/manifest.webmanifest", "/icon.svg"];
+/* NewsRecoms service worker — офлайн-оболочка PWA.
+ * Все пути относительные (./), чтобы работать с GitHub Pages по любому подпути.
+ */
+const CACHE = "nr-shell-v2";
+const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -23,8 +25,9 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET") return;
 
   const url = new URL(req.url);
-  // API всегда из сети
-  if (url.pathname.startsWith("/api/")) return;
+
+  // Данные всегда из сети: GitHub API и raw.githubusercontent
+  if (url.hostname === "api.github.com" || url.hostname === "raw.githubusercontent.com") return;
 
   // Навигация — network first, офлайн fallback на shell
   if (req.mode === "navigate") {
@@ -32,10 +35,10 @@ self.addEventListener("fetch", (event) => {
       fetch(req)
         .then((res) => {
           const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put("/index.html", copy)).catch(() => undefined);
+          caches.open(CACHE).then((c) => c.put("./index.html", copy)).catch(() => undefined);
           return res;
         })
-        .catch(() => caches.match("/index.html").then((r) => r ?? Response.error())),
+        .catch(() => caches.match("./index.html").then((r) => r ?? Response.error())),
     );
     return;
   }

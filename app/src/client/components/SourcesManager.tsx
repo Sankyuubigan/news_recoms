@@ -40,7 +40,7 @@ export default function SourcesManager({ sources, onReload }: Props) {
       onReload();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      setError(/409/.test(msg) ? "Такой источник уже добавлен" : "Не удалось добавить источник");
+      setError(/уже добавлен|duplicate/i.test(msg) ? "Такой источник уже добавлен" : msg || "Не удалось добавить источник");
     } finally {
       setBusy(false);
     }

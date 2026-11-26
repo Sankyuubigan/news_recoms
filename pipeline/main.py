@@ -4,8 +4,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 
-from api_client import WorkerClient
-from config import get_settings
+from config import apply_args, get_settings, parse_args
 from filters.ad_filter import AdFilter
 from filters.dedup import DedupIndex, content_hash, normalize_url
 from learner import run_learner
@@ -18,6 +17,7 @@ from parsers.base import ParseError
 from parsers.rss import RssParser
 from parsers.telegram import TelegramParser
 from parsers.youtube import YouTubeParser
+from storage import Storage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,22 +35,24 @@ def parser_for(source: SourceConfig, timeout: float):
     return RssParser(timeout=timeout)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    apply_args(args)
     settings = get_settings()
-    if not settings.api_base or not settings.ingest_secret:
-        log.error("WORKER_BASE_URL and INGEST_SECRET are required")
+
+    try:
+        storage = Storage(settings.data_path)
+    except OSError as e:
+        log.error("cannot open data dir %s: %s", settings.data_path, e)
         return 2
 
-    client = WorkerClient(settings.api_base, settings.ingest_secret)
+    log.info("data dir: %s", storage.dir)
+    storage.merge_user_state()
+
     stats = RunStats()
     status_ok = True
 
-    try:
-        bootstrap = client.bootstrap()
-    except Exception as e:  # noqa: BLE001
-        log.error("bootstrap failed: %s", e)
-        return 3
-
+    bootstrap = storage.bundle()
     bundle = bootstrap.bundle()
     log.info(
         "bootstrap: %d sources, %d recent urls, %d pending_ai",
@@ -120,8 +122,6 @@ def main() -> int:
     )
 
     # ------------------------------------------------ 3. layer 2: LLM scoring
-    ingest_items: list[IngestItem] = []
-
     # pending_ai из прошлых запусков добавляем первыми
     pending_payload: list[dict] = []
     for p in bootstrap.pending_ai_items:
@@ -179,16 +179,33 @@ def main() -> int:
     else:
         log.info("nothing to score")
 
-    # ----------------------------------- 4. build ingest: pending_ai + new
-    pending_by_id = {f"pending_{p['id']}": p for p in bootstrap.pending_ai_items}
+    # YouTube deep summary для новых видео с высоким score
+    if bundle.youtube_deep_summary_enabled and settings.gemini_video_api_key and clean_posts:
+        try:
+            updated = apply_deep_summary(
+                clean_posts,
+                scores,
+                settings.gemini_video_api_key,
+                bundle.youtube_deep_summary_min_score,
+                settings.youtube_max_deep_per_run,
+            )
+            if updated:
+                log.info("youtube deep summary applied to %d videos", updated)
+        except Exception as e:  # noqa: BLE001
+            log.warning("youtube deep summary stage failed: %s", e)
 
-    for temp_id, p in pending_by_id.items():
+    # ----------------------------------- 4. build ingest: pending_ai + new
+    ingest_items: list[IngestItem] = []
+
+    for p in bootstrap.pending_ai_items:
+        temp_id = f"pending_{p['id']}"
         sc = scores.get(temp_id)
         if not sc:
-            continue  # остаётся pending_ai в БД
+            continue  # остаётся pending_ai
         ingest_items.append(
             IngestItem(
-                source_identifier=p.get("source_identifier") or _identifier_by_name(bootstrap.sources, p.get("source_name")),
+                source_identifier=p.get("source_identifier")
+                or _identifier_by_name(bootstrap.sources, p.get("source_name")),
                 external_id=p.get("external_id"),
                 url=p["url"],
                 content_hash=p["content_hash"],
@@ -208,31 +225,16 @@ def main() -> int:
                 ad_reason=sc.get("ad_reason"),
                 cluster_slug=sc.get("cluster_slug"),
                 status=_status_for(sc, bundle.min_inbox_score),
-                published_at=p.get("published_at") or datetime.now(timezone.utc).isoformat(),
+                published_at=p.get("published_at")
+                or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
         )
 
-    # YouTube deep summary для новых видео с высоким score
-    if bundle.youtube_deep_summary_enabled and settings.gemini_video_api_key and clean_posts:
-        try:
-            updated = apply_deep_summary(
-                clean_posts,
-                scores,
-                settings.gemini_video_api_key,
-                bundle.youtube_deep_summary_min_score,
-                settings.youtube_max_deep_per_run,
-            )
-            if updated:
-                log.info("youtube deep summary applied to %d videos", updated)
-        except Exception as e:  # noqa: BLE001
-            log.warning("youtube deep summary stage failed: %s", e)
-
     for i, post in enumerate(clean_posts):
-        temp_id = f"item_{i}"
-        sc = scores.get(temp_id)
+        sc = scores.get(f"item_{i}")
         if sc is None:
             # AI не обработал — в pending_ai, чтобы не потерять
-            ingest_items.append(_to_ingest(post, None, bundle.min_inbox_score, status="pending_ai"))
+            ingest_items.append(_to_ingest(post, None, status="pending_ai"))
             stats.pending_ai_count += 1
             continue
 
@@ -241,13 +243,13 @@ def main() -> int:
             stats.rejected_count += 1
         elif status == "inbox":
             stats.inbox_added_count += 1
-        ingest_items.append(_to_ingest(post, sc, bundle.min_inbox_score, status=status))
+        ingest_items.append(_to_ingest(post, sc, status=status))
 
-    # ------------------------------------------------------- 5. send to DB
+    # ------------------------------------------------------- 5. write feed
     alerts: list[dict] = []
     if ingest_items and not settings.dry_run:
         try:
-            resp = client.ingest(ingest_items)
+            resp = storage.ingest(ingest_items)
             alerts = resp.get("alerts") or []
             log.info(
                 "ingest: inserted=%s updated=%s merged=%s skipped=%s",
@@ -261,12 +263,12 @@ def main() -> int:
             stats.errors.append(f"ingest: {e}")
             status_ok = False
     elif settings.dry_run:
-        log.info("DRY_RUN: would send %d items", len(ingest_items))
+        log.info("DRY_RUN: would write %d items", len(ingest_items))
 
     # ------------------------------------------------------- 6. source status
     if source_updates and not settings.dry_run:
         try:
-            client.update_source_status(source_updates)
+            storage.update_source_status(source_updates)
         except Exception as e:  # noqa: BLE001
             log.warning("source status update failed: %s", e)
 
@@ -280,17 +282,33 @@ def main() -> int:
     if not settings.dry_run:
         try:
             router = build_router_from_json(settings.llm_providers_json)
-            run_learner(client, router, bundle)
+            run_learner(storage, router, bundle)
         except Exception as e:  # noqa: BLE001
             log.warning("learner failed: %s", e)
 
-    # ------------------------------------------------------------- 9. stats
-    stats.status = "success" if status_ok and not stats.errors else ("partial" if stats.ai_processed_count else "failed")
+    # ------------------------------------------------------------- 9. prune
     if not settings.dry_run:
         try:
-            client.record_run(stats)
+            storage.prune()
         except Exception as e:  # noqa: BLE001
-            log.warning("record_run failed: %s", e)
+            log.warning("prune failed: %s", e)
+
+    # ------------------------------------------------------------- 10. stats
+    stats.status = (
+        "success"
+        if status_ok and not stats.errors
+        else ("partial" if stats.ai_processed_count else "failed")
+    )
+    if not settings.dry_run:
+        try:
+            storage.record_run(stats)
+            storage.save()
+        except Exception as e:  # noqa: BLE001
+            log.exception("save failed")
+            stats.errors.append(f"save: {e}")
+            status_ok = False
+    else:
+        log.info("DRY_RUN: files not written")
 
     log.info(
         "done: fetched=%d ads=%d dups=%d ai=%d inbox=%d rejected=%d pending=%d status=%s",
@@ -320,7 +338,7 @@ def _identifier_by_name(sources: list[SourceConfig], name: str | None) -> str:
     return ""
 
 
-def _to_ingest(post: RawPost, sc: dict | None, min_score: float, status: str) -> IngestItem:
+def _to_ingest(post: RawPost, sc: dict | None, status: str) -> IngestItem:
     return IngestItem(
         source_identifier=post.source_identifier,
         external_id=post.external_id,

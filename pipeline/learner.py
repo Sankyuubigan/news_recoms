@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import logging
 
-from api_client import WorkerClient
 from llm.prompts import PROFILE_SYSTEM_PROMPT, build_profile_user_prompt
 from llm.router import AllProvidersFailed, LLMRouter
 from models import ProfileUpdateResponse, SettingsBundle
+from storage import Storage
 
 log = logging.getLogger(__name__)
 
 
 def run_learner(
-    client: WorkerClient,
+    storage: Storage,
     router: LLMRouter,
     bundle: SettingsBundle,
 ) -> bool:
@@ -19,7 +19,7 @@ def run_learner(
 
     Возвращает True, если профиль обновлён.
     """
-    feedback = client.unprocessed_feedback()
+    feedback = storage.unprocessed_feedback()
     if len(feedback) < max(1, bundle.learn_feedback_threshold):
         log.info(
             "learner: skipped (%d feedback, threshold %d)",
@@ -30,7 +30,7 @@ def run_learner(
 
     likes = [f for f in feedback if f.get("feedback") == "like"]
     dislikes = [f for f in feedback if f.get("feedback") == "dislike"]
-    item_ids = [int(f["id"]) for f in feedback if isinstance(f.get("id"), int)]
+    item_ids = [str(f["id"]) for f in feedback if f.get("id")]
 
     if not likes and not dislikes:
         return False
@@ -50,6 +50,11 @@ def run_learner(
         log.warning("learner: empty profile returned")
         return False
 
-    client.update_profile(profile[:4000], item_ids)
-    log.info("learner: profile updated (%d likes, %d dislikes) — %s", len(likes), len(dislikes), result.changelog[:200])
+    storage.update_profile(profile[:4000], item_ids)
+    log.info(
+        "learner: profile updated (%d likes, %d dislikes) — %s",
+        len(likes),
+        len(dislikes),
+        result.changelog[:200],
+    )
     return True
