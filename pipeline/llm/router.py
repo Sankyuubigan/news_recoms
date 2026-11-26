@@ -266,6 +266,20 @@ def validate_providers_json(raw_json: str) -> list[Problem]:
                     f"БЕЗ внешних кавычек: значение должно начинаться с «[» и заканчиваться «]»",
                 )
             ]
+
+        # Вторая частая ошибка: вставили весь файл .env целиком, а не одно значение.
+        looks_like_env_file = "LLM_PROVIDERS_JSON" in raw or raw.lstrip().startswith("#")
+        if looks_like_env_file:
+            return [
+                Problem(
+                    "error",
+                    "в секрет вставлен весь файл .env (или его фрагмент), а нужно только ОДНО "
+                    "значение. Секрет должен начинаться с «[» и заканчиваться «]» — это JSON-массив "
+                    "провайдеров. Всё, что до «[» (комментарии, «LLM_PROVIDERS_JSON=») и после «]», "
+                    "нужно убрать",
+                )
+            ]
+
         snippet = raw[max(0, e.pos - 40) : e.pos + 40].replace("\n", " ")
         return [
             Problem(

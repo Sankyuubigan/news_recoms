@@ -482,6 +482,19 @@ class TestValidateProvidersJson:
         assert "обёрнут в кавычки" in errors[0]
         assert "GitHub Secrets" in errors[0]
 
+    def test_pasted_whole_env_file_gets_specific_hint(self) -> None:
+        """Вторая частая ошибка: в секрет вставили весь .env вместо значения."""
+        env_file = (
+            "# ============================================================\n"
+            "# NewsRecoms — пример переменных окружения\n"
+            "# ============================================================\n"
+            "LLM_PROVIDERS_JSON='[]'\n"
+        )
+        errors = self._errors(env_file)
+        assert len(errors) == 1
+        assert "вставлен весь файл .env" in errors[0]
+        assert "начинаться с «[»" in errors[0]
+
     def test_valid_config_has_no_problems(self) -> None:
         assert validate_providers_json(json.dumps([make_good_config()])) == []
 
