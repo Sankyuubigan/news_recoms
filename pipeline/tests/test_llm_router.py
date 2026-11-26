@@ -810,10 +810,13 @@ class TestProvidersFile:
         assert names == ["groq-gpt-oss", "gemini-flash-1", "gemini-flash-2"]
         # qwen3.8-27b у Groq имеет TPM 800 — меньше системного промпта, он бесполезен.
         assert router.providers[0].model_list[0] == "openai/gpt-oss-120b"
-        # Gemini flash РАБОТАЕТ (7 успешных вызовов в прогоне 45808244483), просто
-        # часто отдаёт 503 — на этот случай резерв flash-lite.
+        # gemini-3.5-flash МЁРТВ на наших ключах: зонд дал 0 успехов из 10,
+        # каждый раз ReadTimeout по 90с. Держать его в списке = платить
+        # временем прогона за ничего. Только flash-lite (5/5, батч 20 за ~10с).
         for p in router.providers[1:]:
-            assert p.model_list == ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+            assert p.model_list == ["gemini-3.5-flash-lite"]
+            # Таймаут ниже 90с: висящая модель отсекается за 45с, а не за полторы минуты.
+            assert p.timeout_sec <= 45
 
 
 class TestCooldownWaiting:
