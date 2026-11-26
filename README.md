@@ -1,4 +1,4 @@
-# PulseFilter
+# NewsRecoms
 
 Персональный AI-агрегатор контента: Telegram-каналы, RSS/сайты и YouTube → AI-фильтр мусора →
 чистая лента в PWA на телефоне и ПК. **Хостинг $0, карта не нужна.**
@@ -32,7 +32,7 @@ Python **не ходит в D1 напрямую** — только через `/
 ### 1. Клонируй и поставь зависимости
 
 ```bash
-git clone <твой-репозиторий> pulsefilter && cd pulsefilter
+git clone <твой-репозиторий> news_recoms && cd news_recoms
 cd app && npm install && cd ..
 cd pipeline && pip install -r requirements.txt && cd ..
 ```
@@ -42,7 +42,7 @@ cd pipeline && pip install -r requirements.txt && cd ..
 ```bash
 cd app
 npx wrangler login
-npx wrangler d1 create pulsefilter-db
+npx wrangler d1 create news_recoms-db
 ```
 
 Скопируй выведенный `database_id` в `app/wrangler.jsonc` вместо `REPLACE_WITH_YOUR_D1_DATABASE_ID`.
@@ -50,7 +50,7 @@ npx wrangler d1 create pulsefilter-db
 ### 3. Примени миграции
 
 ```bash
-npx wrangler d1 migrations apply pulsefilter-db --remote
+npx wrangler d1 migrations apply news_recoms-db --remote
 ```
 
 ### 4. Задай секреты Worker
@@ -74,7 +74,7 @@ npm run build
 npx wrangler deploy
 ```
 
-Получишь URL вида `https://pulsefilter.<subdomain>.workers.dev` — открывай, вводи `APP_PASSWORD`,
+Получишь URL вида `https://news_recoms.<subdomain>.workers.dev` — открывай, вводи `APP_PASSWORD`,
 и добавляй на главный экран телефона (PWA).
 
 ### 6. Настрой GitHub Actions
@@ -83,7 +83,7 @@ npx wrangler deploy
 
 | Secret | Значение |
 | :--- | :--- |
-| `WORKER_BASE_URL` | `https://pulsefilter.<subdomain>.workers.dev` |
+| `WORKER_BASE_URL` | `https://news_recoms.<subdomain>.workers.dev` |
 | `INGEST_SECRET` | тот же, что в шаге 4 |
 | `LLM_PROVIDERS_JSON` | JSON-массив провайдеров (см. `.env.example`) |
 | `GEMINI_VIDEO_API_KEY` | опционально — для глубоких саммари YouTube |
@@ -145,7 +145,7 @@ DRY_RUN=true python main.py
 Локальная D1:
 
 ```bash
-cd app && npx wrangler d1 migrations apply pulsefilter-db --local
+cd app && npx wrangler d1 migrations apply news_recoms-db --local
 ```
 
 ## Тесты
@@ -162,7 +162,7 @@ cd pipeline && python -m pytest
 ## Структура
 
 ```text
-pulsefilter/
+news_recoms/
 ├── .github/workflows/     ingest.yml (cron) + deploy-app.yml (push в main)
 ├── app/                   Cloudflare Worker (Hono) + React PWA
 │   ├── migrations/        0001_init.sql — схема D1

@@ -1,4 +1,4 @@
-/* PulseFilter service worker — minimal offline shell */
+/* NewsRecoms service worker — minimal offline shell */
 const CACHE = "pf-shell-v1";
 const SHELL = ["/", "/index.html", "/manifest.webmanifest", "/icon.svg"];
 

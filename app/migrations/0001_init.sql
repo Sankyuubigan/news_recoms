@@ -1,4 +1,4 @@
--- PulseFilter — Cloudflare D1 schema (SQLite)
+-- NewsRecoms — Cloudflare D1 schema (SQLite)
 -- Dates: ISO-8601 UTC TEXT
 
 -- 1. Источники контента (Telegram-каналы, RSS сайтов, YouTube-каналы)

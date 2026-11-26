@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "pulsefilter",
+  "name": "news_recoms",
   "main": "src/worker/index.ts",
   "compatibility_date": "2025-08-01",
   "observability": {
@@ -15,7 +15,7 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "pulsefilter-db",
+      "database_name": "news_recoms-db",
       "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
       "migrations_dir": "migrations"
     }

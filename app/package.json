@@ -1,5 +1,5 @@
 {
-  "name": "pulsefilter-app",
+  "name": "news_recoms-app",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -9,8 +9,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.worker.json",
     "preview": "wrangler dev",
     "deploy": "wrangler deploy",
-    "db:migrate:local": "wrangler d1 migrations apply pulsefilter-db --local",
-    "db:migrate:remote": "wrangler d1 migrations apply pulsefilter-db --remote"
+    "db:migrate:local": "wrangler d1 migrations apply news_recoms-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply news_recoms-db --remote"
   },
   "dependencies": {
     "hono": "^4.6.14",

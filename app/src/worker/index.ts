@@ -27,7 +27,7 @@ app.all("/api/*", (c) => c.json({ error: "not_found" }, 404));
 // --- Static assets (SPA) ---
 app.get("*", (c) => {
   if (c.env.ASSETS) return c.env.ASSETS.fetch(c.req.raw);
-  return c.text("PulseFilter API is running. Build the client to serve the PWA.", 200);
+  return c.text("NewsRecoms API is running. Build the client to serve the PWA.", 200);
 });
 
 export default app;

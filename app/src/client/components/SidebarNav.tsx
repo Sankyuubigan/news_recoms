@@ -26,7 +26,7 @@ export default function SidebarNav({ tab, counts, onChange, onLogout }: Props) {
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-400 to-blue-500">
             <Flame className="h-4 w-4 text-ink-950" strokeWidth={2.5} />
           </div>
-          <span className="text-[15px] font-semibold tracking-tight text-white">PulseFilter</span>
+          <span className="text-[15px] font-semibold tracking-tight text-white">NewsRecoms</span>
         </div>
 
         <nav className="flex flex-col gap-1">

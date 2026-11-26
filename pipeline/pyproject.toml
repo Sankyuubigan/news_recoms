@@ -1,7 +1,7 @@
 [project]
-name = "pulsefilter-pipeline"
+name = "news_recoms-pipeline"
 version = "1.0.0"
-description = "Ingest & AI filtering pipeline for PulseFilter"
+description = "Ingest & AI filtering pipeline for NewsRecoms"
 requires-python = ">=3.12"
 
 [tool.pytest.ini_options]

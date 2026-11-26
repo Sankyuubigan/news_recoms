@@ -1,6 +1,6 @@
 {
-  "name": "PulseFilter",
-  "short_name": "PulseFilter",
+  "name": "NewsRecoms",
+  "short_name": "NewsRecoms",
   "description": "Персональный AI-агрегатор новостей без мусора",
   "start_url": "/",
   "scope": "/",

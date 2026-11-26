@@ -16,7 +16,7 @@ class WorkerClient:
         self._headers = {
             "Authorization": f"Bearer {secret}",
             "Content-Type": "application/json",
-            "User-Agent": "PulseFilter-Pipeline/1.0",
+            "User-Agent": "NewsRecoms-Pipeline/1.0",
         }
         self._timeout = timeout
 

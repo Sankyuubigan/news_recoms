@@ -34,7 +34,7 @@ export default function LoginScreen({ onSuccess }: Props) {
             <Zap className="h-7 w-7 text-ink-950" strokeWidth={2.5} />
           </div>
           <div className="text-center">
-            <h1 className="text-xl font-semibold tracking-tight text-white">PulseFilter</h1>
+            <h1 className="text-xl font-semibold tracking-tight text-white">NewsRecoms</h1>
             <p className="mt-1 text-sm text-slate-400">Твоя лента без мусора</p>
           </div>
         </div>
