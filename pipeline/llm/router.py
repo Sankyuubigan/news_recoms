@@ -161,6 +161,20 @@ class LLMRouter:
         self.providers = [p for p in providers if p.usable]
         if not self.providers:
             raise ValueError("no usable LLM providers configured")
+
+        # Имена обязаны быть уникальны: по имени хранятся состояние (кулдаун,
+        # счётчики, dynamic_cap) и OpenAI-клиент с api_key. Иначе несколько
+        # ключей одного провайдера делили бы один кулдаун и один ключ.
+        used: set[str] = set()
+        for p in self.providers:
+            if p.name in used:
+                base, i = p.name, 2
+                while f"{base}#{i}" in used:
+                    i += 1
+                p.name = f"{base}#{i}"
+                log.warning("duplicate provider name %r renamed to %r", base, p.name)
+            used.add(p.name)
+
         self.states: dict[str, ProviderState] = {p.name: ProviderState() for p in self.providers}
         self._clients: dict[str, OpenAI] = {}
 

@@ -258,6 +258,27 @@ class TestBuildRouterFromJson:
         with pytest.raises(ValueError):
             build_router_from_json(raw)
 
+    def test_duplicate_names_get_unique_state(self) -> None:
+        """Несколько ключей одного провайдера: у каждого свой кулдаун и клиент."""
+        raw = json.dumps(
+            [
+                {"name": "gemini", "base_url": "https://a/v1", "api_key": "k1", "model": "m"},
+                {"name": "gemini", "base_url": "https://a/v1", "api_key": "k2", "model": "m"},
+                {"name": "gemini", "base_url": "https://a/v1", "api_key": "k3", "model": "m"},
+            ]
+        )
+        router = build_router_from_json(raw)
+
+        names = [p.name for p in router.providers]
+        assert names == ["gemini", "gemini#2", "gemini#3"]
+        assert len(set(names)) == 3
+        assert len(router.states) == 3
+
+        # каждый провайдер получает свой клиент со своим ключом
+        clients = [router._client(p) for p in router.providers]
+        assert len({id(c) for c in clients}) == 3
+        assert [p.api_key for p in router.providers] == ["k1", "k2", "k3"]
+
 
 class TestStats:
     def test_stats_tracked(self) -> None:
