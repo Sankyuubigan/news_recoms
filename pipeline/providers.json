@@ -1,11 +1,11 @@
 [
   {
-    "name": "groq-qwen",
+    "name": "groq-gpt-oss",
     "base_url": "https://api.groq.com/openai/v1",
     "api_key_env": "GROQ_KEY",
-    "models": ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"],
-    "max_batch_size": 6,
-    "rpm_delay_sec": 20.0,
+    "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
+    "max_batch_size": 4,
+    "rpm_delay_sec": 25.0,
     "timeout_sec": 120,
     "json_mode": "json_object"
   },

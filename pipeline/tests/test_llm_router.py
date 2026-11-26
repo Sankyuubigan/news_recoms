@@ -806,11 +806,11 @@ class TestProvidersFile:
         router = build_router_from_json("", providers_file=str(path))
         assert len(router.providers) == 3
         names = [p.name for p in router.providers]
-        # Groq идёт первым: у Gemini free-tier выедается мгновенно,
-        # а Groq отдаёт 200 стабильно — он и должен быть основным.
-        assert names == ["groq-qwen", "gemini-flash-lite-1", "gemini-flash-lite-2"]
-        assert router.providers[0].model_list[0] == "qwen/qwen3.8-27b"
-        # В бесплатном тарифе осталась только flash-lite: flash/pro платные
+        # Groq первым: у Gemini free-tier выедается мгновенно, Groq отдаёт 200 стабильно.
+        assert names == ["groq-gpt-oss", "gemini-flash-lite-1", "gemini-flash-lite-2"]
+        # qwen3.8-27b у Groq имеет TPM 800 — меньше системного промпта, он бесполезен.
+        assert router.providers[0].model_list[0] == "openai/gpt-oss-120b"
+        # В бесплатном тарифе Gemini осталась только flash-lite: flash/pro платные
         # с апреля 2026, на них всегда приходит 429 «limit: 0».
         for p in router.providers[1:]:
             assert p.model_list == ["gemini-3.5-flash-lite"]
