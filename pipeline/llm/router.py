@@ -362,9 +362,12 @@ def validate_providers_json(raw_json: str) -> list[Problem]:
                     f"(латиница, цифры и _, не начинается с цифры)"
                 )
             elif not os.environ.get(env_name, "").strip():
-                err(
-                    f"{pos}: api_key_env указывает на «{env_name}», но такая переменная "
-                    f"окружения пуста или не задана — добавь секрет с этим именем "
+                # Не ошибка: провайдер просто пропускается. Иначе пользователь,
+                # которому нужен только Gemini, обязан был бы завести ключи Groq
+                # и OpenRouter, иначе пайплайн не стартует.
+                warn(
+                    f"{pos}: переменная «{env_name}» не задана — провайдер будет ПРОПУЩЕН. "
+                    f"Если он нужен, добавь секрет с этим именем "
                     f"(Settings → Secrets and variables → Actions)"
                 )
         elif _looks_like_placeholder(api_key):
@@ -918,10 +921,12 @@ def build_router_from_json(
 
     usable = [p for p in providers if p.usable]
     if not usable:
+        skipped = [p.name for p in providers if not p.usable]
         raise ProvidersConfigError(
             [
                 "ни одного рабочего провайдера — все отфильтрованы "
-                "(нужны одновременно base_url, ключ (api_key или api_key_env) и model/models)"
+                "(нужны одновременно base_url, ключ (api_key или api_key_env) и model/models). "
+                f"Пропущены: {', '.join(skipped)}"
             ]
         )
 

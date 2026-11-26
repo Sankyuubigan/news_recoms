@@ -683,25 +683,40 @@ class TestApiKeyEnv:
         p = Provider.from_dict(make_good_config(api_key="from-field", api_key_env="GEMINI_KEY_1"))
         assert p.api_key == "from-field"
 
-    def test_missing_env_is_reported_at_startup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_env_is_warning_not_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Не задан ключ Groq, а нужен только Gemini — провайдер пропускается, запуск идёт."""
         monkeypatch.delenv("GEMINI_KEY_1", raising=False)
         cfg = make_good_config()
         del cfg["api_key"]
         cfg["api_key_env"] = "GEMINI_KEY_1"
 
-        errors = [p.message for p in validate_providers_json(json.dumps([cfg])) if p.is_error]
-        assert len(errors) == 1
-        assert "GEMINI_KEY_1" in errors[0]
-        assert "пуста или не задана" in errors[0]
+        problems = validate_providers_json(json.dumps([cfg]))
+        assert not any(p.is_error for p in problems)
+        assert any("будет ПРОПУЩЕН" in p.message for p in problems)
 
-    def test_empty_env_is_reported(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_empty_env_is_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GROQ_KEY", "   ")
         cfg = make_good_config()
         del cfg["api_key"]
         cfg["api_key_env"] = "GROQ_KEY"
 
-        errors = [p.message for p in validate_providers_json(json.dumps([cfg])) if p.is_error]
-        assert any("пуста или не задана" in e for e in errors)
+        problems = validate_providers_json(json.dumps([cfg]))
+        assert not any(p.is_error for p in problems)
+        assert any("будет ПРОПУЩЕН" in p.message for p in problems)
+
+    def test_only_configured_providers_are_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Только Gemini-ключ задан — роутер содержит один провайдер, остальные пропущены."""
+        from pathlib import Path
+
+        monkeypatch.setenv("GEMINI_KEY_1", "k1")
+        monkeypatch.delenv("GEMINI_KEY_2", raising=False)
+        monkeypatch.delenv("GROQ_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_KEY", raising=False)
+
+        path = Path(__file__).resolve().parent.parent / "providers.json"
+        router = build_router_from_json("", providers_file=str(path))
+        assert len(router.providers) == 1
+        assert router.providers[0].name == "gemini-flash-primary"
 
     def test_bad_env_name_is_reported(self) -> None:
         cfg = make_good_config()
