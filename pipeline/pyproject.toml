@@ -1,0 +1,14 @@
+[project]
+name = "pulsefilter-pipeline"
+version = "1.0.0"
+description = "Ingest & AI filtering pipeline for PulseFilter"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
