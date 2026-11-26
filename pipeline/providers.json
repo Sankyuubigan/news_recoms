@@ -10,20 +10,20 @@
     "json_mode": "json_object"
   },
   {
-    "name": "gemini-flash-lite-1",
+    "name": "gemini-flash-1",
     "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
     "api_key_env": "GEMINI_KEY_1",
-    "models": ["gemini-3.5-flash-lite"],
+    "models": ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
     "max_batch_size": 20,
     "rpm_delay_sec": 6.0,
     "timeout_sec": 90,
     "json_mode": "json_object"
   },
   {
-    "name": "gemini-flash-lite-2",
+    "name": "gemini-flash-2",
     "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
     "api_key_env": "GEMINI_KEY_2",
-    "models": ["gemini-3.5-flash-lite"],
+    "models": ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
     "max_batch_size": 20,
     "rpm_delay_sec": 6.0,
     "timeout_sec": 90,

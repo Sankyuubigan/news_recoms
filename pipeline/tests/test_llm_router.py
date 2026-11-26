@@ -731,7 +731,7 @@ class TestApiKeyEnv:
         path = Path(__file__).resolve().parent.parent / "providers.json"
         router = build_router_from_json("", providers_file=str(path))
         assert len(router.providers) == 1
-        assert router.providers[0].name == "gemini-flash-lite-1"
+        assert router.providers[0].name == "gemini-flash-1"
 
     def test_bad_env_name_is_reported(self) -> None:
         cfg = make_good_config()
@@ -807,13 +807,13 @@ class TestProvidersFile:
         assert len(router.providers) == 3
         names = [p.name for p in router.providers]
         # Groq первым: у Gemini free-tier выедается мгновенно, Groq отдаёт 200 стабильно.
-        assert names == ["groq-gpt-oss", "gemini-flash-lite-1", "gemini-flash-lite-2"]
+        assert names == ["groq-gpt-oss", "gemini-flash-1", "gemini-flash-2"]
         # qwen3.8-27b у Groq имеет TPM 800 — меньше системного промпта, он бесполезен.
         assert router.providers[0].model_list[0] == "openai/gpt-oss-120b"
-        # В бесплатном тарифе Gemini осталась только flash-lite: flash/pro платные
-        # с апреля 2026, на них всегда приходит 429 «limit: 0».
+        # Gemini flash РАБОТАЕТ (7 успешных вызовов в прогоне 45808244483), просто
+        # часто отдаёт 503 — на этот случай резерв flash-lite.
         for p in router.providers[1:]:
-            assert p.model_list == ["gemini-3.5-flash-lite"]
+            assert p.model_list == ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
 
 
 class TestCooldownWaiting:
