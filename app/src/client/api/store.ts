@@ -258,22 +258,23 @@ class FeedStore {
     limit?: number;
     offset?: number;
   }): FeedResponse {
-    const all = this.getMerged().filter((it) => it.status !== "pending_ai");
+    const all = this.getMerged();
+    const visible = all.filter((it) => it.status !== "pending_ai");
 
-    const counts = { inbox: 0, saved: 0, archived: 0, rejected: 0 };
+    const counts = { inbox: 0, saved: 0, archived: 0, rejected: 0, pending_ai: 0 };
     for (const it of all) {
       if (it.status in counts) counts[it.status as keyof typeof counts] += 1;
     }
 
     const categories = Array.from(
       new Set(
-        all
+        visible
           .filter((it) => it.status === "inbox" && it.category && it.category !== "Общее")
           .map((it) => it.category as string),
       ),
     ).slice(0, 20);
 
-    let filtered = all.filter((it) => it.status === params.status);
+    let filtered = visible.filter((it) => it.status === params.status);
     if (params.category && params.category !== "Все") {
       filtered = filtered.filter((it) => it.category === params.category);
     }

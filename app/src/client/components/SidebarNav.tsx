@@ -4,7 +4,13 @@ export type Tab = "inbox" | "saved" | "archived" | "rejected" | "settings";
 
 interface Props {
   tab: Tab;
-  counts: { inbox: number; saved: number; archived: number; rejected: number };
+  counts: {
+    inbox: number;
+    saved: number;
+    archived: number;
+    rejected: number;
+    pending_ai: number;
+  };
   onChange: (tab: Tab) => void;
   onOpenSync: () => void;
   synced: boolean;

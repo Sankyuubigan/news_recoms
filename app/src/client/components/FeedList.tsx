@@ -12,6 +12,8 @@ interface Props {
   query: string;
   tabLabel: string;
   highlightedId: string | null;
+  /** Сколько постов собрано, но ещё не прогнано через LLM. */
+  pendingAi: number;
   onSortChange: (s: "score" | "date") => void;
   onCategoryChange: (c: string) => void;
   onQueryChange: (q: string) => void;
@@ -30,6 +32,7 @@ export default function FeedList({
   query,
   tabLabel,
   highlightedId,
+  pendingAi,
   onSortChange,
   onCategoryChange,
   onQueryChange,
@@ -135,10 +138,24 @@ export default function FeedList({
             <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-ink-850">
               <Flame className="h-5 w-5 text-slate-600" />
             </div>
-            <p className="text-[14px] text-slate-400">Здесь пока пусто</p>
-            <p className="mt-1 max-w-xs text-[12.5px] text-slate-600">
-              Добавь источники в настройках и запусти пайплайн — лента наполнится.
-            </p>
+            {pendingAi > 0 ? (
+              <>
+                <p className="text-[14px] text-slate-300">
+                  Собрано {pendingAi} {pendingAi % 10 === 1 && pendingAi % 100 !== 11 ? "пост" : "постов"}, но их ещё не оценил ИИ
+                </p>
+                <p className="mt-1 max-w-sm text-[12.5px] leading-relaxed text-slate-500">
+                  Добавь в репозиторий секрет <code className="text-slate-400">LLM_PROVIDERS_JSON</code> и
+                  запусти сбор ещё раз — посты дообработаются и появятся здесь.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-[14px] text-slate-400">Здесь пока пусто</p>
+                <p className="mt-1 max-w-xs text-[12.5px] text-slate-600">
+                  Добавь источники в настройках и запусти пайплайн — лента наполнится.
+                </p>
+              </>
+            )}
           </div>
         )}
 

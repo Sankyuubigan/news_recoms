@@ -101,7 +101,14 @@ export interface RunsFile {
 export interface FeedResponse {
   items: FeedItem[];
   total: number;
-  counts: { inbox: number; saved: number; archived: number; rejected: number };
+  counts: {
+    inbox: number;
+    saved: number;
+    archived: number;
+    rejected: number;
+    /** Собраны, но ещё не прогнаны через LLM (нет ключа или все провайдеры легли). */
+    pending_ai: number;
+  };
   categories: string[];
 }
 

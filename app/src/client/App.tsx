@@ -52,7 +52,13 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("Источники");
 
   const [items, setItems] = useState<FeedItem[]>([]);
-  const [counts, setCounts] = useState({ inbox: 0, saved: 0, archived: 0, rejected: 0 });
+  const [counts, setCounts] = useState({
+    inbox: 0,
+    saved: 0,
+    archived: 0,
+    rejected: 0,
+    pending_ai: 0,
+  });
   const [categories, setCategories] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -270,6 +276,7 @@ export default function App() {
               query={query}
               tabLabel={TAB_LABEL[tab]}
               highlightedId={highlightedId}
+              pendingAi={counts.pending_ai}
               onSortChange={setSort}
               onCategoryChange={setCategory}
               onQueryChange={setQuery}
