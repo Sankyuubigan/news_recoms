@@ -2,6 +2,18 @@ import { useEffect, useState } from "react";
 import { Flame, Loader2, Package, Save } from "lucide-react";
 import { api, type ContentKind } from "../api/client";
 
+const DEFAULT_REPO_RULES =
+  "Интересно: практичные open-source инструменты, приложения с удобным GUI/Web-интерфейсом, " +
+  "полезные self-hosted сервисы, расширения, зрелые библиотеки и рабочие AI/dev-инструменты, " +
+  "которые экономят время и решают реальные задачи.\n" +
+  "Мусор (ставить 1–3): развлекательные эксперименты и челленджи без практической пользы, " +
+  "нецелевые порты ПО на экзотическое железо, узкий аппаратный хакинг ради демонстрации, " +
+  "избыточные терминальные/консольные клоны повседневных программ, учебные переписывания " +
+  "базовых утилит без реального выигрыша и пустые обёртки.";
+
+const DEFAULT_REPO_PROFILE =
+  "Пока недостаточно реакций пользователя по репозиториям. Опирайся на правила для репозиториев.";
+
 interface Props {
   settings: Record<string, string>;
   onReload: () => void;
@@ -11,8 +23,8 @@ export default function RulesAndProfile({ settings, onReload }: Props) {
   const [kind, setKind] = useState<ContentKind>("news");
   const [manualRules, setManualRules] = useState("");
   const [learnedProfile, setLearnedProfile] = useState("");
-  const [repoRules, setRepoRules] = useState("");
-  const [repoLearnedProfile, setRepoLearnedProfile] = useState("");
+  const [repoRules, setRepoRules] = useState(DEFAULT_REPO_RULES);
+  const [repoLearnedProfile, setRepoLearnedProfile] = useState(DEFAULT_REPO_PROFILE);
   const [adRegex, setAdRegex] = useState("");
   const [minScore, setMinScore] = useState("6.5");
   const [minReposScore, setMinReposScore] = useState("6.5");
@@ -23,8 +35,10 @@ export default function RulesAndProfile({ settings, onReload }: Props) {
   useEffect(() => {
     setManualRules(settings.manual_rules ?? "");
     setLearnedProfile(settings.learned_profile ?? "");
-    setRepoRules(settings.repo_rules ?? "");
-    setRepoLearnedProfile(settings.repo_learned_profile ?? "");
+    setRepoRules(settings.repo_rules?.trim() ? settings.repo_rules : DEFAULT_REPO_RULES);
+    setRepoLearnedProfile(
+      settings.repo_learned_profile?.trim() ? settings.repo_learned_profile : DEFAULT_REPO_PROFILE,
+    );
     setAdRegex(settings.ad_regex_blacklist ?? "");
     setMinScore(settings.min_inbox_score ?? "6.5");
     setMinReposScore(settings.min_repos_score ?? "6.5");
