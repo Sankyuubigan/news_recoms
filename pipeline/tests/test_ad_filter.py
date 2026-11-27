@@ -62,6 +62,14 @@ class TestAdFilterHardPatterns:
         f = AdFilter()
         assert f.check(make_post("")) is None
 
+    def test_channel_subscription_footer_passes(self) -> None:
+        f = AdFilter()
+        post = make_post(
+            "Новый open-source инструмент для локального поиска по PDF.\n"
+            "Подписывайся на канал, чтобы не пропустить обновления!"
+        )
+        assert f.check(post) is None
+
 
 class TestAdFilterCustomPatterns:
     def test_custom_regex_from_settings(self) -> None:

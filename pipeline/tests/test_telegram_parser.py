@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from parsers.base import ParseError, make_title
+from unittest.mock import patch
+
+from parsers.base import ParseError, extract_repo_url, make_title
 from parsers.telegram import TelegramParser
-from models import SourceConfig
+from models import BackfillConfig, SourceConfig
 
 SOURCE = SourceConfig(id=1, type="telegram", name="Test Channel", identifier="testchannel")
 
@@ -117,3 +119,74 @@ class TestMakeTitle:
 
     def test_empty(self) -> None:
         assert make_title("") == ""
+
+
+class TestTelegramLinksAndBackfill:
+    def test_extracts_hidden_github_href(self) -> None:
+        html = """
+        <html><body>
+        <div class="tgme_widget_message_wrap">
+          <div class="tgme_widget_message" data-post="reposch/500">
+            <div class="tgme_widget_message_text">
+              Отличный инструмент для анализа логов.
+              <a href="https://github.com/acme/log-viewer/tree/main">GitHub</a>
+            </div>
+            <a class="tgme_widget_message_date" href="https://t.me/reposch/500">
+              <time datetime="2026-11-26T10:00:00+00:00"></time>
+            </a>
+          </div>
+        </div>
+        </body></html>
+        """
+        src = SourceConfig(id=2, type="telegram", kind="repos", name="Repos", identifier="reposch")
+        posts = TelegramParser().parse_html(html, src)
+        assert len(posts) == 1
+        assert posts[0].kind == "repos"
+        assert posts[0].repo_url == "https://github.com/acme/log-viewer"
+        assert "https://github.com/acme/log-viewer/tree/main" in posts[0].content_orig
+
+    def test_extract_repo_url_filters_non_repo_paths(self) -> None:
+        assert extract_repo_url("https://github.com/trending/python") is None
+        assert extract_repo_url("https://github.com/org/tool.git") == "https://github.com/org/tool"
+        assert extract_repo_url("https://codeberg.org/dev/app") == "https://codeberg.org/dev/app"
+
+    def test_backfill_paginates_and_stops_at_id(self) -> None:
+        page1 = """
+        <html><head><link rel="prev" href="/s/reposch?before=100"></head><body>
+        <div class="tgme_widget_message_wrap"><div class="tgme_widget_message" data-post="reposch/100">
+          <div class="tgme_widget_message_text">Пост 100</div>
+          <a class="tgme_widget_message_date" href="https://t.me/reposch/100"><time datetime="2026-11-20T10:00:00Z"></time></a>
+        </div></div>
+        <div class="tgme_widget_message_wrap"><div class="tgme_widget_message" data-post="reposch/101">
+          <div class="tgme_widget_message_text">Пост 101</div>
+          <a class="tgme_widget_message_date" href="https://t.me/reposch/101"><time datetime="2026-11-21T10:00:00Z"></time></a>
+        </div></div>
+        </body></html>
+        """
+        page2 = """
+        <html><body>
+        <div class="tgme_widget_message_wrap"><div class="tgme_widget_message" data-post="reposch/98">
+          <div class="tgme_widget_message_text">Пост 98</div>
+          <a class="tgme_widget_message_date" href="https://t.me/reposch/98"><time datetime="2026-11-18T10:00:00Z"></time></a>
+        </div></div>
+        <div class="tgme_widget_message_wrap"><div class="tgme_widget_message" data-post="reposch/99">
+          <div class="tgme_widget_message_text">Пост 99</div>
+          <a class="tgme_widget_message_date" href="https://t.me/reposch/99"><time datetime="2026-11-19T10:00:00Z"></time></a>
+        </div></div>
+        </body></html>
+        """
+        src = SourceConfig(id=2, type="telegram", kind="repos", name="Repos", identifier="reposch")
+        cfg = BackfillConfig(enabled=True, stop_at_id=98, batch_limit=10)
+        parser = TelegramParser(page_delay=0.0)
+
+        def fake_fetch(url: str) -> str:
+            return page2 if "before=100" in url else page1
+
+        with patch.object(parser, "fetch", side_effect=fake_fetch):
+            posts, next_cfg = parser.parse_backfill(src, cfg)
+
+        ids = [p.external_id for p in posts]
+        assert ids == ["101", "100", "99"]
+        assert next_cfg.enabled is False
+        assert next_cfg.cursor_id == 98
+        assert next_cfg.processed_total == 3

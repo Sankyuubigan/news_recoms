@@ -207,17 +207,65 @@ def test_prune_removes_old_rejected_but_keeps_saved(store: Storage) -> None:
     store.ingest(
         [
             _item("https://example.com/old-rejected", status="rejected", published_at=_iso(10)),
+            _item("https://example.com/backfilled-rejected", status="rejected", published_at=_iso(90)),
             _item("https://example.com/old-saved", status="saved", published_at=_iso(365)),
             _item("https://example.com/fresh", status="inbox", published_at=_iso(0)),
         ]
     )
+    # Состариваем fetched_at только у первого — второй только что пришёл из архива и должен уцелеть
+    for it in store.feed:
+        if it["url"] == "https://example.com/old-rejected":
+            it["fetched_at"] = _iso(10)
+
     removed = store.prune()
 
     assert removed["rejected"] == 1
     urls = {it["url"] for it in store.feed}
     assert "https://example.com/old-rejected" not in urls
+    assert "https://example.com/backfilled-rejected" in urls
     assert "https://example.com/old-saved" in urls
     assert "https://example.com/fresh" in urls
+
+
+def test_prune_keeps_separate_limits_for_news_and_repos(store: Storage) -> None:
+    news = [_item(f"https://example.com/n{i}", kind="news", published_at=_iso(i)) for i in range(12)]
+    repos = [_item(f"https://example.com/r{i}", kind="repos", published_at=_iso(200 + i)) for i in range(6)]
+    store.ingest(news + repos)
+
+    import storage as storage_mod
+
+    original = storage_mod.FEED_MAX_ITEMS
+    storage_mod.FEED_MAX_ITEMS = 8
+    try:
+        store.prune()
+    finally:
+        storage_mod.FEED_MAX_ITEMS = original
+
+    news_left = [it for it in store.feed if it["kind"] == "news"]
+    repos_left = [it for it in store.feed if it["kind"] == "repos"]
+    assert len(news_left) == 8
+    assert len(repos_left) == 6
+
+
+def test_feedback_and_profile_isolated_by_kind(store: Storage) -> None:
+    store.ingest(
+        [
+            _item("https://example.com/n", kind="news"),
+            _item("https://example.com/r", kind="repos", repo_url="https://github.com/a/b"),
+        ]
+    )
+    for it in store.feed:
+        it["feedback"] = "like"
+
+    news_fb = store.unprocessed_feedback(kind="news")
+    repos_fb = store.unprocessed_feedback(kind="repos")
+    assert len(news_fb) == 1 and len(repos_fb) == 1
+
+    store.update_profile("Только практичные GUI-инструменты", [repos_fb[0]["id"]], kind="repos")
+    assert store.settings["repo_learned_profile"] == "Только практичные GUI-инструменты"
+    assert store.settings["learned_profile"] != "Только практичные GUI-инструменты"
+    assert len(store.unprocessed_feedback(kind="repos")) == 0
+    assert len(store.unprocessed_feedback(kind="news")) == 1
 
 
 def test_prune_respects_feed_max_items_but_never_saved(store: Storage) -> None:

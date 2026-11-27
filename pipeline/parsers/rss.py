@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import feedparser
 
 from models import RawPost, SourceConfig
-from parsers.base import BaseParser, ParseError, make_title
+from parsers.base import BaseParser, ParseError, detect_lang, extract_repo_url, make_title
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +31,15 @@ def _clean_html(raw: str) -> str:
     return BeautifulSoup(raw, "html.parser").get_text(" ", strip=True)
 
 
+def _html_links(raw: str) -> list[str]:
+    from bs4 import BeautifulSoup
+
+    if not raw:
+        return []
+    soup = BeautifulSoup(raw, "html.parser")
+    return [str(a.get("href")).strip() for a in soup.select("a[href]") if a.get("href")]
+
+
 class RssParser(BaseParser):
     """RSS/Atom через feedparser + опциональный trafilatura для полного текста."""
 
@@ -49,8 +58,10 @@ class RssParser(BaseParser):
             if not link:
                 continue
 
+            raw_summary = entry.get("summary") or entry.get("description") or ""
             title = _clean_html(entry.get("title") or "")
-            summary = _clean_html(entry.get("summary") or entry.get("description") or "")
+            summary = _clean_html(raw_summary)
+            repo_url = extract_repo_url(primary_url=link, links=_html_links(raw_summary), text=summary)
 
             content = summary
             if source.fetch_full_text or len(summary) < 250:
@@ -77,15 +88,17 @@ class RssParser(BaseParser):
                         media_url = enc.get("href")
                         break
 
-            lang = (feed.get("feed", {}).get("language") or "").lower()
-            original_lang = "en" if lang.startswith("en") else ("ru" if lang.startswith("ru") else "ru")
+            declared_lang = feed.get("feed", {}).get("language") or ""
+            original_lang = detect_lang(f"{title} {summary}", declared_lang)
 
             posts.append(
                 RawPost(
                     source_identifier=source.identifier,
                     source_name=source.name,
+                    kind=source.kind,
                     external_id=entry.get("id") or link,
                     url=link,
+                    repo_url=repo_url,
                     content_type="article",
                     title_orig=(title or make_title(content))[:300],
                     content_orig=content[: self.MAX_CONTENT],

@@ -48,6 +48,18 @@ DEFAULT_SETTINGS: dict[str, str] = {
         "Пока недостаточно реакций пользователя для формирования автоматического профиля. "
         "Опирайся на ручные правила."
     ),
+    "repo_rules": (
+        "Интересно: практичные open-source инструменты, приложения с удобным GUI/Web-интерфейсом, "
+        "полезные self-hosted сервисы, расширения, зрелые библиотеки и рабочие AI/dev-инструменты, "
+        "которые экономят время и решают реальные задачи.\n"
+        "Мусор (ставить 1–3): развлекательные эксперименты и челленджи без практической пользы, "
+        "нецелевые порты ПО на экзотическое железо, узкий аппаратный хакинг ради демонстрации, "
+        "избыточные терминальные/консольные клоны повседневных программ, учебные переписывания "
+        "базовых утилит без реального выигрыша и пустые обёртки."
+    ),
+    "repo_learned_profile": (
+        "Пока недостаточно реакций пользователя по репозиториям. Опирайся на правила для репозиториев."
+    ),
     "ad_regex_blacklist": (
         "erid\\s*[:=]\\s*[a-zA-Z0-9]+\n"
         "#реклама\\b\n"
@@ -61,6 +73,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
         "запишись на вебинар"
     ),
     "min_inbox_score": "6.5",
+    "min_repos_score": "6.5",
     "telegram_alert_score": "9.0",
     "learn_feedback_threshold": "10",
     "youtube_deep_summary_enabled": "true",
@@ -100,9 +113,70 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
     {
         "id": 4,
         "type": "telegram",
+        "kind": "news",
         "name": "AI Newz",
         "identifier": "ai_newz",
         "category_hint": "ИИ",
+        "fetch_full_text": 0,
+        "enabled": 1,
+    },
+    {
+        "id": 5,
+        "type": "rss",
+        "kind": "repos",
+        "name": "GitHub Trending (Daily)",
+        "identifier": "https://mshibanami.github.io/GitHubTrendingRSS/daily/all.xml",
+        "category_hint": "Open Source",
+        "fetch_full_text": 0,
+        "enabled": 1,
+    },
+    {
+        "id": 6,
+        "type": "rss",
+        "kind": "repos",
+        "name": "Show HN (50+)",
+        "identifier": "https://hnrss.org/show?points=50",
+        "category_hint": "Инструменты",
+        "fetch_full_text": 0,
+        "enabled": 1,
+    },
+    {
+        "id": 7,
+        "type": "rss",
+        "kind": "repos",
+        "name": "selfh.st",
+        "identifier": "https://selfh.st/rss/",
+        "category_hint": "Self-hosted",
+        "fetch_full_text": 0,
+        "enabled": 1,
+    },
+    {
+        "id": 8,
+        "type": "rss",
+        "kind": "repos",
+        "name": "Console.dev",
+        "identifier": "https://console.dev/rss.xml",
+        "category_hint": "DevTools",
+        "fetch_full_text": 0,
+        "enabled": 1,
+    },
+    {
+        "id": 9,
+        "type": "rss",
+        "kind": "repos",
+        "name": "Lobsters: Show",
+        "identifier": "https://lobste.rs/t/show.rss",
+        "category_hint": "Open Source",
+        "fetch_full_text": 0,
+        "enabled": 1,
+    },
+    {
+        "id": 10,
+        "type": "telegram",
+        "kind": "repos",
+        "name": "Находки в опенсорсе",
+        "identifier": "opensource_findings",
+        "category_hint": "Open Source",
         "fetch_full_text": 0,
         "enabled": 1,
     },
@@ -243,9 +317,11 @@ class Storage:
 
     @staticmethod
     def _normalize_source(raw: dict[str, Any]) -> dict[str, Any]:
-        return {
+        kind = raw.get("kind")
+        norm: dict[str, Any] = {
             "id": int(raw.get("id") or 0),
             "type": raw.get("type") or "rss",
+            "kind": kind if kind in ("news", "repos") else "news",
             "name": raw.get("name") or raw.get("identifier") or "Источник",
             "identifier": raw.get("identifier") or "",
             "category_hint": raw.get("category_hint") or "",
@@ -255,6 +331,9 @@ class Storage:
             "last_error": raw.get("last_error"),
             "created_at": raw.get("created_at") or now_iso(),
         }
+        if isinstance(raw.get("backfill"), dict):
+            norm["backfill"] = raw["backfill"]
+        return norm
 
     # -------------------------------------------------------------- accessors
 
@@ -375,14 +454,17 @@ class Storage:
             log.info("storage: merged %d user-state changes into feed", applied)
         return applied
 
-    def unprocessed_feedback(self) -> list[dict]:
-        """Элементы с 👍/👎, ещё не учтёнными в learned_profile."""
+    def unprocessed_feedback(self, kind: str | None = None) -> list[dict]:
+        """Элементы с 👍/👎, ещё не учтёнными в профиле (можно фильтровать по kind)."""
         out = []
         for it in self.feed:
+            if kind is not None and (it.get("kind") or "news") != kind:
+                continue
             if it.get("feedback") in ("like", "dislike") and not it.get("feedback_processed"):
                 out.append(
                     {
                         "id": it.get("id"),
+                        "kind": it.get("kind") or "news",
                         "feedback": it.get("feedback"),
                         "feedback_reason": it.get("feedback_reason"),
                         "title": it.get("title_ru") or it.get("title_orig"),
@@ -393,8 +475,9 @@ class Storage:
                 )
         return out
 
-    def update_profile(self, learned_profile: str, item_ids: list[str]) -> dict:
-        self.config.setdefault("settings", {})["learned_profile"] = learned_profile
+    def update_profile(self, learned_profile: str, item_ids: list[str], kind: str = "news") -> dict:
+        setting_key = "repo_learned_profile" if kind == "repos" else "learned_profile"
+        self.config.setdefault("settings", {})[setting_key] = learned_profile
         self.config["updated_at"] = now_iso()
         self._dirty_config = True
 
@@ -448,6 +531,7 @@ class Storage:
             ):
                 recent_clusters.append(
                     {
+                        "kind": it.get("kind") or "news",
                         "cluster_slug": it["cluster_slug"],
                         "title_ru": it.get("title_ru") or it.get("title_orig"),
                         "url": it.get("url"),
@@ -566,11 +650,14 @@ class Storage:
         keep = CONTENT_KEEP_PENDING if item.status == "pending_ai" else CONTENT_KEEP
         return {
             "id": make_item_id(item.url),
+            "kind": item.kind or src.get("kind") or "news",
             "source_identifier": item.source_identifier,
             "source_name": src.get("name") or item.source_identifier or "Источник",
             "source_type": src.get("type") or _type_for_content(item.content_type),
             "external_id": item.external_id,
             "url": item.url,
+            "repo_url": item.repo_url,
+            "interface_type": item.interface_type,
             "content_hash": item.content_hash,
             "content_type": item.content_type,
             "original_lang": item.original_lang,
@@ -611,6 +698,8 @@ class Storage:
             "ad_reason",
             "cluster_slug",
             "media_url",
+            "repo_url",
+            "interface_type",
         ):
             value = getattr(item, field)
             if value is not None:
@@ -639,6 +728,8 @@ class Storage:
                 src["last_fetched_at"] = upd["last_fetched_at"]
             if "last_error" in upd:
                 src["last_error"] = upd["last_error"]
+            if "backfill" in upd:
+                src["backfill"] = upd["backfill"]
             touched += 1
         if touched:
             self.config["updated_at"] = now_iso()
@@ -678,20 +769,25 @@ class Storage:
     # ----------------------------------------------------------------- prune
 
     def prune(self) -> dict:
-        """Чистит старый мусор, никогда не трогая `saved`."""
+        """Чистит старый мусор по fetched_at с раздельными лимитами для news и repos.
+
+        Используем fetched_at (а не published_at), чтобы исторические посты из
+        разбора архива не удалялись в момент загрузки; `saved` не удаляются никогда.
+        """
         now = datetime.now(timezone.utc)
         rejected_cutoff = now - timedelta(days=REJECTED_TTL_DAYS)
         archived_cutoff = now - timedelta(days=ARCHIVED_TTL_DAYS)
 
         removed = {"rejected": 0, "archived": 0, "overflow": 0}
-        kept: list[dict[str, Any]] = []
+        by_kind: dict[str, list[dict[str, Any]]] = {}
 
         for it in self.feed:
             status = it.get("status")
-            ts = _parse_iso(it.get("published_at")) or _parse_iso(it.get("fetched_at"))
+            ts = _parse_iso(it.get("fetched_at")) or _parse_iso(it.get("published_at"))
+            kind = it.get("kind") or "news"
 
             if status == "saved":
-                kept.append(it)
+                by_kind.setdefault(kind, []).append(it)
                 continue
             if status == "rejected" and ts and ts < rejected_cutoff:
                 removed["rejected"] += 1
@@ -699,16 +795,21 @@ class Storage:
             if status == "archived" and ts and ts < archived_cutoff and len(self.feed) > FEED_MAX_ITEMS:
                 removed["archived"] += 1
                 continue
-            kept.append(it)
+            by_kind.setdefault(kind, []).append(it)
 
-        # Жёсткий лимит: если всё ещё больше FEED_MAX_ITEMS — режем самые старые не-saved
-        if len(kept) > FEED_MAX_ITEMS:
-            saved = [it for it in kept if it.get("status") == "saved"]
-            others = [it for it in kept if it.get("status") != "saved"]
-            others.sort(key=lambda r: r.get("published_at") or "", reverse=True)
+        # Лимит FEED_MAX_ITEMS применяется отдельно на каждый поток (news / repos),
+        # чтобы поток новостей не вытеснял отобранные репозитории.
+        kept: list[dict[str, Any]] = []
+        for items_of_kind in by_kind.values():
+            if len(items_of_kind) <= FEED_MAX_ITEMS:
+                kept.extend(items_of_kind)
+                continue
+            saved = [it for it in items_of_kind if it.get("status") == "saved"]
+            others = [it for it in items_of_kind if it.get("status") != "saved"]
+            others.sort(key=lambda r: r.get("fetched_at") or r.get("published_at") or "", reverse=True)
             allowed = max(FEED_MAX_ITEMS - len(saved), 0)
-            removed["overflow"] = max(len(others) - allowed, 0)
-            kept = saved + others[:allowed]
+            removed["overflow"] += max(len(others) - allowed, 0)
+            kept.extend(saved + others[:allowed])
 
         total_removed = sum(removed.values())
         if total_removed:

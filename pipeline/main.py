@@ -8,7 +8,7 @@ from config import apply_args, get_settings, parse_args
 from filters.ad_filter import AdFilter
 from filters.dedup import DedupIndex, content_hash, normalize_url
 from learner import run_learner
-from llm.prompts import SYSTEM_PROMPT, build_scoring_user_prompt
+from llm.prompts import REPO_SYSTEM_PROMPT, SYSTEM_PROMPT, build_scoring_user_prompt
 from llm.router import (
     AllProvidersFailed,
     ProvidersConfigError,
@@ -76,6 +76,13 @@ def main(argv: list[str] | None = None) -> int:
     # ------------------------------------------------------------ 1. collect
     all_posts: list[RawPost] = []
     source_updates: list[dict] = []
+    allow_backfill = len(bootstrap.pending_ai_items) < settings.max_pending_before_backfill_pause
+    if not allow_backfill:
+        log.info(
+            "backfill paused: pending_ai queue has %d items (limit %d)",
+            len(bootstrap.pending_ai_items),
+            settings.max_pending_before_backfill_pause,
+        )
 
     for source in bootstrap.sources:
         if not source.enabled:
@@ -84,13 +91,31 @@ def main(argv: list[str] | None = None) -> int:
         try:
             posts = parser.parse(source, limit=settings.max_items_per_source)
             all_posts.extend(posts)
-            source_updates.append(
-                {
-                    "identifier": source.identifier,
-                    "last_fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "last_error": None,
-                }
-            )
+            upd: dict = {
+                "identifier": source.identifier,
+                "last_fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "last_error": None,
+            }
+
+            # Порционный разбор истории канала (Способ 1: t.me/s/?before=ID)
+            if (
+                allow_backfill
+                and isinstance(parser, TelegramParser)
+                and source.backfill
+                and source.backfill.enabled
+            ):
+                bf_posts, next_bf = parser.parse_backfill(source, source.backfill)
+                all_posts.extend(bf_posts)
+                upd["backfill"] = next_bf.model_dump(mode="json")
+                log.info(
+                    "backfill %-24s +%3d posts (cursor=%s, active=%s)",
+                    source.name[:24],
+                    len(bf_posts),
+                    next_bf.cursor_id,
+                    next_bf.enabled,
+                )
+
+            source_updates.append(upd)
             log.info("parsed %-28s %3d posts", source.name[:28], len(posts))
         except ParseError as e:
             source_updates.append({"identifier": source.identifier, "last_error": str(e)[:400]})
@@ -104,20 +129,33 @@ def main(argv: list[str] | None = None) -> int:
     stats.fetched_count = len(all_posts)
     log.info("collected %d raw posts", len(all_posts))
 
-    # ------------------------------------------- 2. layer 1: ads + dedup
+    # ------------------------------------------- 2. layer 1: dedup + ads
+    # Сначала дедуп (чтобы уже виденную рекламу не считать повторно каждые 2 часа),
+    # затем regex-фильтр с сохранением отсечённого в rejected (видно в «Мусоре ИИ»).
     clean_posts: list[RawPost] = []
-    for post in all_posts:
-        reason = ad_filter.check(post)
-        if reason:
-            stats.ad_blocked_count += 1
-            continue
+    ad_rejected_items: list[IngestItem] = []
 
+    for post in all_posts:
         url = normalize_url(post.url)
         chash = content_hash(post.title_orig, post.content_orig)
         if dedup.is_duplicate(url, chash):
             stats.dedup_skipped_count += 1
             continue
         dedup.add(url, chash)
+
+        reason = ad_filter.check(post)
+        if reason:
+            stats.ad_blocked_count += 1
+            stats.rejected_count += 1
+            ad_rejected_items.append(
+                _to_ingest(
+                    post,
+                    {"is_ad": True, "ad_reason": reason, "score": 0.0},
+                    status="rejected",
+                )
+            )
+            continue
+
         clean_posts.append(post)
 
     log.info(
@@ -128,10 +166,17 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # ------------------------------------------------ 3. layer 2: LLM scoring
-    # pending_ai из прошлых запусков добавляем первыми
-    pending_payload: list[dict] = []
+    # pending_ai из прошлых запусков идут первыми; ограничиваем объём за один прогон,
+    # чтобы крон гарантированно укладывался в таймаут (остаток спокойно уйдёт в pending_ai).
+    queued_by_kind: dict[str, list[dict]] = {"news": [], "repos": []}
+    ai_budget = max(1, settings.max_ai_items_per_run)
+    scheduled_count = 0
+
     for p in bootstrap.pending_ai_items:
-        pending_payload.append(
+        if scheduled_count >= ai_budget:
+            break
+        kind = p.get("kind") if p.get("kind") in ("news", "repos") else "news"
+        queued_by_kind[kind].append(
             {
                 "temp_id": f"pending_{p['id']}",
                 "source_name": p.get("source_name") or "—",
@@ -140,10 +185,12 @@ def main(argv: list[str] | None = None) -> int:
                 "text": (p.get("content_orig") or "")[:3000],
             }
         )
+        scheduled_count += 1
 
-    new_payload: list[dict] = []
     for i, post in enumerate(clean_posts):
-        new_payload.append(
+        if scheduled_count >= ai_budget:
+            break
+        queued_by_kind[post.kind].append(
             {
                 "temp_id": f"item_{i}",
                 "source_name": post.source_name,
@@ -152,12 +199,13 @@ def main(argv: list[str] | None = None) -> int:
                 "text": post.content_orig[:3000],
             }
         )
+        scheduled_count += 1
 
-    all_payload = pending_payload + new_payload
+    total_scheduled = len(queued_by_kind["news"]) + len(queued_by_kind["repos"])
     scores: dict[str, dict] = {}
     router = None
 
-    if all_payload:
+    if total_scheduled:
         # Состояние «ключ выключен» с прошлого прогона (TTL 24ч внутри роутера).
         disabled_snapshot = storage.get_disabled_providers()
         if disabled_snapshot:
@@ -166,7 +214,6 @@ def main(argv: list[str] | None = None) -> int:
         try:
             router = build_router_from_json(settings.llm_providers_json, disabled=disabled_snapshot)
         except ProvidersConfigError as e:
-            # Показываем КАЖДУЮ проблему отдельной строкой в runs.json → UI «Логи запусков».
             log.error("конфигурация LLM невалидна — %d проблем:", len(e.problems))
             for i, p in enumerate(e.problems, 1):
                 log.error("  %d. %s", i, p)
@@ -176,35 +223,40 @@ def main(argv: list[str] | None = None) -> int:
             log.error("LLM is not configured: %s", e)
             stats.errors.append(f"llm not configured: {e}")
             llm_unconfigured = True
+
         if router is not None:
+            stream_configs = (
+                ("news", SYSTEM_PROMPT, bundle.manual_rules, bundle.learned_profile),
+                ("repos", REPO_SYSTEM_PROMPT, bundle.repo_rules, bundle.repo_learned_profile),
+            )
             try:
-                results = router.score(
-                    SYSTEM_PROMPT,
-                    lambda chunk: build_scoring_user_prompt(
-                        bundle.manual_rules,
-                        bundle.learned_profile,
-                        chunk,
-                        bootstrap.recent_clusters,
-                    ),
-                    all_payload,
-                )
-                for temp_id, r in results.items():
-                    scores[temp_id] = r.model_dump(mode="json")
+                for kind, sys_prompt, rules_text, profile_text in stream_configs:
+                    payload = queued_by_kind[kind]
+                    if not payload:
+                        continue
+                    clusters = [
+                        c for c in bootstrap.recent_clusters if (c.get("kind") or "news") == kind
+                    ]
+                    results = router.score(
+                        sys_prompt,
+                        lambda chunk, r=rules_text, p=profile_text, cl=clusters: build_scoring_user_prompt(
+                            r, p, chunk, cl
+                        ),
+                        payload,
+                    )
+                    for temp_id, res_item in results.items():
+                        scores[temp_id] = res_item.model_dump(mode="json")
+                    log.info("LLM[%s] scored %d/%d items", kind, len(results), len(payload))
                 stats.ai_processed_count = len(scores)
-                stats.provider_stats = router.stats()
-                log.info("LLM scored %d/%d items", len(scores), len(all_payload))
             except AllProvidersFailed as e:
-                # Часть постов могла быть оценена до отказа — сохраняем их.
-                # Выбросить оплаченную работу только потому, что на остатке
-                # кончились лимиты, значит сжечь квоту впустую.
-                for temp_id, r in e.partial.items():
-                    scores[temp_id] = r.model_dump(mode="json")
+                for temp_id, res_item in e.partial.items():
+                    scores[temp_id] = res_item.model_dump(mode="json")
                 if scores:
                     log.warning(
                         "LLM остановился (%s), но %d постов из %d уже оценены — сохраняю их",
                         e,
                         len(scores),
-                        len(all_payload),
+                        total_scheduled,
                     )
                 log.error("all LLM providers failed: %s", e)
                 stats.errors.append(f"all providers failed: {e}")
@@ -215,8 +267,6 @@ def main(argv: list[str] | None = None) -> int:
                 stats.errors.append(f"llm: {e}")
                 status_ok = False
             finally:
-                # Даже при падении сохраняем состояние: иначе мёртвый ключ будет
-                # тратить запрос в каждом следующем прогоне.
                 stats.provider_stats = router.stats()
                 if not settings.dry_run:
                     try:
@@ -241,20 +291,30 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as e:  # noqa: BLE001
             log.warning("youtube deep summary stage failed: %s", e)
 
-    # ----------------------------------- 4. build ingest: pending_ai + new
-    ingest_items: list[IngestItem] = []
+    # ----------------------------------- 4. build ingest: ads + pending_ai + new
+    ingest_items: list[IngestItem] = list(ad_rejected_items)
 
     for p in bootstrap.pending_ai_items:
         temp_id = f"pending_{p['id']}"
         sc = scores.get(temp_id)
         if not sc:
             continue  # остаётся pending_ai
+        kind = p.get("kind") if p.get("kind") in ("news", "repos") else "news"
+        min_score = bundle.min_repos_score if kind == "repos" else bundle.min_inbox_score
+        status = _status_for(sc, min_score)
+        if status == "rejected":
+            stats.rejected_count += 1
+        elif status == "inbox":
+            stats.inbox_added_count += 1
         ingest_items.append(
             IngestItem(
                 source_identifier=p.get("source_identifier")
                 or _identifier_by_name(bootstrap.sources, p.get("source_name")),
+                kind=kind,
                 external_id=p.get("external_id"),
                 url=p["url"],
+                repo_url=p.get("repo_url") or _valid_http_url(sc.get("repo_url")),
+                interface_type=sc.get("interface_type"),
                 content_hash=p["content_hash"],
                 content_type=p.get("content_type") or "article",
                 original_lang=p.get("original_lang") or "ru",
@@ -271,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
                 is_ad=bool(sc.get("is_ad")),
                 ad_reason=sc.get("ad_reason"),
                 cluster_slug=sc.get("cluster_slug"),
-                status=_status_for(sc, bundle.min_inbox_score),
+                status=status,
                 published_at=p.get("published_at")
                 or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
@@ -280,12 +340,13 @@ def main(argv: list[str] | None = None) -> int:
     for i, post in enumerate(clean_posts):
         sc = scores.get(f"item_{i}")
         if sc is None:
-            # AI не обработал — в pending_ai, чтобы не потерять
+            # AI не обработал или отложили из-за лимита прогона — в pending_ai
             ingest_items.append(_to_ingest(post, None, status="pending_ai"))
             stats.pending_ai_count += 1
             continue
 
-        status = _status_for(sc, bundle.min_inbox_score)
+        min_score = bundle.min_repos_score if post.kind == "repos" else bundle.min_inbox_score
+        status = _status_for(sc, min_score)
         if status == "rejected":
             stats.rejected_count += 1
         elif status == "inbox":
@@ -395,11 +456,21 @@ def _identifier_by_name(sources: list[SourceConfig], name: str | None) -> str:
     return ""
 
 
+def _valid_http_url(raw: object) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    u = raw.strip()
+    return u if u.startswith(("http://", "https://")) else None
+
+
 def _to_ingest(post: RawPost, sc: dict | None, status: str) -> IngestItem:
     return IngestItem(
         source_identifier=post.source_identifier,
+        kind=post.kind,
         external_id=post.external_id,
         url=post.url,
+        repo_url=post.repo_url or _valid_http_url((sc or {}).get("repo_url")),
+        interface_type=(sc or {}).get("interface_type"),
         content_hash=content_hash(post.title_orig, post.content_orig),
         content_type=post.content_type,
         original_lang=post.original_lang,

@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 ContentType = Literal["telegram", "article", "youtube"]
+ContentKind = Literal["news", "repos"]
 ItemStatus = Literal["pending_ai", "inbox", "saved", "archived", "rejected"]
 
 
@@ -18,8 +19,10 @@ class RawPost(BaseModel):
 
     source_identifier: str
     source_name: str
+    kind: ContentKind = "news"
     external_id: str | None = None
     url: str
+    repo_url: str | None = None
     content_type: ContentType
     title_orig: str
     content_orig: str
@@ -33,21 +36,37 @@ class RawPost(BaseModel):
         return re.sub(r"\s+", " ", v or "").strip()
 
 
+class BackfillConfig(BaseModel):
+    """Параметры порционного разбора истории канала."""
+
+    enabled: bool = False
+    stop_at_id: int | None = None
+    remaining: int | None = None
+    cursor_id: int | None = None
+    batch_limit: int = 80
+    processed_total: int = 0
+
+
 class SourceConfig(BaseModel):
     id: int
     type: Literal["telegram", "rss", "youtube"]
+    kind: ContentKind = "news"
     name: str
     identifier: str
     category_hint: str | None = ""
     fetch_full_text: int = 0
     enabled: int = 1
+    backfill: BackfillConfig | None = None
 
 
 class SettingsBundle(BaseModel):
     manual_rules: str = ""
     learned_profile: str = ""
+    repo_rules: str = ""
+    repo_learned_profile: str = ""
     ad_regex_blacklist: str = ""
     min_inbox_score: float = 6.5
+    min_repos_score: float = 6.5
     telegram_alert_score: float = 9.0
     learn_feedback_threshold: int = 10
     youtube_deep_summary_enabled: bool = True
@@ -80,8 +99,11 @@ class Bootstrap(BaseModel):
         return SettingsBundle(
             manual_rules=s.get("manual_rules", ""),
             learned_profile=s.get("learned_profile", ""),
+            repo_rules=s.get("repo_rules", ""),
+            repo_learned_profile=s.get("repo_learned_profile", ""),
             ad_regex_blacklist=s.get("ad_regex_blacklist", ""),
             min_inbox_score=_f("min_inbox_score", 6.5),
+            min_repos_score=_f("min_repos_score", 6.5),
             telegram_alert_score=_f("telegram_alert_score", 9.0),
             learn_feedback_threshold=int(_f("learn_feedback_threshold", 10)),
             youtube_deep_summary_enabled=_b("youtube_deep_summary_enabled", True),
@@ -106,6 +128,8 @@ class LLMResultItem(BaseModel):
     key_points_ru: list[str] = Field(default_factory=list)
     ai_reason: str = ""
     cluster_slug: str | None = None
+    repo_url: str | None = None
+    interface_type: str | None = None
 
     @field_validator("score")
     @classmethod
@@ -146,8 +170,11 @@ class ProfileUpdateResponse(BaseModel):
 
 class IngestItem(BaseModel):
     source_identifier: str
+    kind: ContentKind = "news"
     external_id: str | None = None
     url: str
+    repo_url: str | None = None
+    interface_type: str | None = None
     content_hash: str
     content_type: ContentType
     original_lang: str = "ru"

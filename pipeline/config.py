@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # --- YouTube deep summary (опционально) ---
     gemini_video_api_key: str = Field(default="", alias="GEMINI_VIDEO_API_KEY")
-    gemini_video_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_VIDEO_MODEL")
+    gemini_video_model: str = Field(default="gemini-3.5-flash", alias="GEMINI_VIDEO_MODEL")
     youtube_max_deep_per_run: int = Field(default=3, alias="YOUTUBE_MAX_DEEP_PER_RUN")
 
     # --- Telegram alerts (опционально) ---
@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     # --- Поведение ---
     http_timeout_sec: float = Field(default=15.0, alias="HTTP_TIMEOUT_SEC")
     max_items_per_source: int = Field(default=25, alias="MAX_ITEMS_PER_SOURCE")
+    max_ai_items_per_run: int = Field(default=160, alias="MAX_AI_ITEMS_PER_RUN")
+    max_pending_before_backfill_pause: int = Field(default=120, alias="MAX_PENDING_BEFORE_BACKFILL_PAUSE")
     dry_run: bool = Field(default=False, alias="DRY_RUN")
 
     @property

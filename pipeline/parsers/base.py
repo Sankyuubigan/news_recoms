@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
+from urllib.parse import urlparse
 
 import httpx
 
@@ -11,6 +12,25 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+
+_REPO_HOSTS = ("github.com", "gitlab.com", "codeberg.org", "huggingface.co")
+_REPO_SKIP_OWNERS = {
+    "topics",
+    "explore",
+    "trending",
+    "search",
+    "settings",
+    "notifications",
+    "marketplace",
+    "sponsors",
+    "orgs",
+    "features",
+    "pricing",
+    "about",
+    "login",
+    "join",
+}
+_URL_RE = re.compile(r"https?://[^\s<>'\"()\[\]]+")
 
 
 class ParseError(Exception):
@@ -66,7 +86,6 @@ def make_title(text: str, limit: int = 110) -> str:
     cleaned = re.sub(r"\s+", " ", text or "").strip()
     if not cleaned:
         return ""
-    # первое предложение
     m = re.match(r"^(.{10,}?[.!?…])(\s|$)", cleaned)
     candidate = m.group(1) if m else cleaned
     if len(candidate) <= limit:
@@ -75,3 +94,64 @@ def make_title(text: str, limit: int = 110) -> str:
     if " " in cut:
         cut = cut[: cut.rfind(" ")]
     return cut.rstrip(" ,;:-—") + "…"
+
+
+def _canonical_repo_url(raw: str) -> str | None:
+    url = (raw or "").strip().rstrip(".,;:!?)]}>")
+    if not url.startswith(("http://", "https://")):
+        return None
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host not in _REPO_HOSTS:
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) < 2:
+        return None
+    owner, repo = parts[0], parts[1]
+    if owner.lower() in _REPO_SKIP_OWNERS:
+        return None
+    repo = re.sub(r"\.git$", "", repo)
+    if not repo:
+        return None
+    return f"https://{host}/{owner}/{repo}"
+
+
+def extract_repo_url(
+    primary_url: str = "",
+    links: list[str] | None = None,
+    text: str = "",
+) -> str | None:
+    """Находит каноническую ссылку на репозиторий (GitHub/GitLab/Codeberg/HF)."""
+    candidates: list[str] = []
+    if primary_url:
+        candidates.append(primary_url)
+    if links:
+        candidates.extend(links)
+    if text:
+        candidates.extend(_URL_RE.findall(text))
+
+    for candidate in candidates:
+        canonical = _canonical_repo_url(candidate)
+        if canonical:
+            return canonical
+    return None
+
+
+def detect_lang(text: str, declared: str = "") -> str:
+    """Определяет язык ('ru' | 'en') по заголовку/тексту, если источник не указал явно."""
+    low = (declared or "").strip().lower()
+    if low.startswith("en"):
+        return "en"
+    if low.startswith("ru"):
+        return "ru"
+    sample = (text or "")[:600]
+    cyr = len(re.findall(r"[А-Яа-яЁё]", sample))
+    lat = len(re.findall(r"[A-Za-z]", sample))
+    if lat >= 20 and cyr * 3 < lat:
+        return "en"
+    return "ru"
