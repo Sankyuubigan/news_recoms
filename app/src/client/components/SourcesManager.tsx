@@ -156,35 +156,8 @@ export default function SourcesManager({ sources, onReload }: Props) {
   return (
     <div className="space-y-5">
       <form onSubmit={add} className="rounded-xl border border-ink-800 bg-ink-850 p-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="mb-3">
           <h3 className="text-[14px] font-semibold text-white">Добавить источник</h3>
-
-          <div className="flex rounded-lg border border-ink-800 bg-ink-900 p-0.5">
-            <button
-              type="button"
-              onClick={() => setKind("news")}
-              className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-[11.5px] transition ${
-                kind === "news"
-                  ? "bg-emerald-500/15 text-emerald-300"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              <Flame className="h-3 w-3" />
-              Новости
-            </button>
-            <button
-              type="button"
-              onClick={() => setKind("repos")}
-              className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-[11.5px] transition ${
-                kind === "repos"
-                  ? "bg-cyan-500/15 text-cyan-300"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              <Package className="h-3 w-3" />
-              Репозитории
-            </button>
-          </div>
         </div>
 
         <div className="mb-3 flex gap-1.5">
@@ -237,14 +210,43 @@ export default function SourcesManager({ sources, onReload }: Props) {
 
         {error && <p className="mt-2 text-[12.5px] text-rose-400">{error}</p>}
 
-        <button
-          type="submit"
-          disabled={busy || !identifier.trim()}
-          className="mt-3 flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3.5 py-2 text-[13px] font-semibold text-ink-950 transition hover:bg-emerald-400 disabled:opacity-40"
-        >
-          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-          Добавить
-        </button>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <div className="flex rounded-lg border border-ink-800 bg-ink-900 p-0.5">
+            <button
+              type="button"
+              onClick={() => setKind("news")}
+              className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-[11.5px] transition ${
+                kind === "news"
+                  ? "bg-emerald-500/15 text-emerald-300"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              <Flame className="h-3 w-3" />
+              Новости
+            </button>
+            <button
+              type="button"
+              onClick={() => setKind("repos")}
+              className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-[11.5px] transition ${
+                kind === "repos"
+                  ? "bg-cyan-500/15 text-cyan-300"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              <Package className="h-3 w-3" />
+              Репозитории
+            </button>
+          </div>
+
+          <button
+            type="submit"
+            disabled={busy || !identifier.trim()}
+            className="flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3.5 py-2 text-[13px] font-semibold text-ink-950 transition hover:bg-emerald-400 disabled:opacity-40"
+          >
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+            Добавить
+          </button>
+        </div>
       </form>
 
       <div className="space-y-1.5">
