@@ -3,7 +3,7 @@
  * Работает поверх `store` (GitHub-ветка `data`) и сохраняет прежние сигнатуры.
  */
 
-import { dispatchIngest, getRepo, getToken, type RepoRef } from "./github";
+import { detectAppRepo, dispatchIngest, getRepo, getToken, type RepoRef } from "./github";
 import { store, nowIso } from "./store";
 import type {
   BackfillConfig,
@@ -210,7 +210,9 @@ export const api = {
   },
 
   async runIngest(): Promise<void> {
-    const repo = getRepo();
+    // Workflow живёт в репозитории КОДА, а не данных: репо данных приватный и
+    // workflow-файлов не содержит. Диспатчим в app repo, а токен тот же.
+    const repo = detectAppRepo();
     const token = getToken();
     if (!repo || !token) throw new Error("Сначала подключи синхронизацию");
     await dispatchIngest(repo, token);

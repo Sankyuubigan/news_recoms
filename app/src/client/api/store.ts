@@ -200,10 +200,12 @@ class FeedStore {
 
     try {
       const [feedFile, stateFile, configFile, runsFile] = await Promise.all([
-        readJson<FeedItem[]>(this.repo, "feed.json", this.token),
-        readJson<UserState>(this.repo, "user_state.json", this.token),
-        readJson<DataConfig>(this.repo, "config.json", this.token),
-        readJson<RunsFile>(this.repo, "runs.json", this.token),
+        // feed.json и runs.json — только чтение, sha не нужен: идём через raw+json,
+        // чтобы не упереться в 1 МБ у base64-ответа Contents API.
+        readJson<FeedItem[]>(this.repo, "feed.json", this.token, false),
+        readJson<UserState>(this.repo, "user_state.json", this.token, true),
+        readJson<DataConfig>(this.repo, "config.json", this.token, true),
+        readJson<RunsFile>(this.repo, "runs.json", this.token, false),
       ]);
 
       this.feed = feedFile?.data ?? [];

@@ -153,9 +153,9 @@ export default function SyncSettings({ onOpenModal, onRefresh, onNotify }: Props
             <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
             Обновить ленту
           </button>
-          {repo && (
+          {appRepo && (
             <a
-              href={actionsUrl(repo)}
+              href={actionsUrl(appRepo)}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-1.5 rounded-lg bg-ink-800 px-3 py-2 text-[12.5px] text-slate-400 transition hover:bg-ink-700 hover:text-slate-200"

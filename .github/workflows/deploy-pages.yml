@@ -41,6 +41,11 @@ jobs:
 
       - name: Build
         working-directory: app
+        env:
+          # Приватный репозиторий с данными. Задаётся в Settings → Variables
+          # (не Secret: значение попадает в бандл, чтобы фронт знал, куда читать).
+          # В форки не наследуется — форкер по умолчанию пишет в свой репозиторий.
+          VITE_DATA_REPO: ${{ vars.DATA_REPO }}
         run: npm run build
 
       - uses: actions/configure-pages@v5

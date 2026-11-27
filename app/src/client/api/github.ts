@@ -95,9 +95,21 @@ export function detectAppRepo(): RepoRef | null {
   return null;
 }
 
-/** Репозиторий с данными: пользовательский override или сам репозиторий приложения. */
+/**
+ * Репозиторий данных по умолчанию: `VITE_DATA_REPO` из сборки или сам репозиторий
+ * приложения. Владелец задаёт приватный репо через переменную репозитория
+ * (Settings → Variables → Actions), которая в форки не наследуется — поэтому
+ * форкер по умолчанию пишет в свой репозиторий.
+ */
+export function getDataRepoDefault(): RepoRef | null {
+  const raw = import.meta.env.VITE_DATA_REPO as string | undefined;
+  const parsed = raw ? parseRepoSlug(raw) : null;
+  return parsed ?? detectAppRepo();
+}
+
+/** Репозиторий с данными: пользовательский override или репозиторий по умолчанию. */
 export function getRepo(): RepoRef | null {
-  return getDataRepoOverride() ?? detectAppRepo();
+  return getDataRepoOverride() ?? getDataRepoDefault();
 }
 
 // ------------------------------------------------------------------- base64
@@ -154,29 +166,78 @@ export interface RemoteJson<T> {
   sha: string;
 }
 
+const RATE_LIMIT_MESSAGE =
+  "Лимит GitHub API исчерпан — подожди пару минут и обнови страницу";
+
+/**
+ * Читает файл через Contents API с media-type `raw+json`.
+ *
+ * Зачем отдельный путь: обычный JSON-ответ Contents API отдаёт содержимое в base64
+ * и работает только до 1 МБ. `feed.json` уже перевалил за 760 КБ, а base64
+ * добавляет ещё ~33% → лимит был бы превышен, и лента навсегда сломалась бы.
+ * `raw+json` официально обслуживает файлы до 100 МБ и отдаёт их как есть.
+ *
+ * `sha` здесь не возвращается — этот путь только для read-only файлов
+ * (`feed.json`, `runs.json`), которые фронтенд никогда не пишет.
+ */
+async function readViaApiRaw<T>(
+  repo: RepoRef,
+  path: string,
+  token: string,
+): Promise<RemoteJson<T> | null> {
+  const res = await gh(`/repos/${repoSlug(repo)}/contents/${path}?ref=${DATA_BRANCH}`, token, {
+    headers: { Accept: "application/vnd.github.raw+json" },
+  });
+
+  if (res.status === 404) return null;
+  if (res.status === 401) throw new GithubError(401, "Токен недействителен или истёк");
+  if (res.status === 403 || res.status === 429) throw new GithubError(res.status, RATE_LIMIT_MESSAGE);
+  if (!res.ok) {
+    throw new GithubError(res.status, `Не удалось прочитать ${path}: ${await errorText(res)}`);
+  }
+  return { data: (await res.json()) as T, sha: "" };
+}
+
 /**
  * Читает JSON-файл из ветки `data`.
  *
- * Без токена — напрямую с raw.githubusercontent.com (быстро, без лимита API).
- * С токеном — через Contents API, потому что для записи нужен `sha`.
- * Если Contents API упёрся в лимит запросов — тихий фоллбек на raw.
+ * - `needSha: true` (по умолчанию) — через Contents API в JSON: нужен `sha` для записи.
+ *   Работает только с файлами < 1 МБ, поэтому для `user_state.json` / `config.json`.
+ * - `needSha: false` — через `raw+json`: файлы до 100 МБ, но без `sha`.
+ *   Для read-only `feed.json` / `runs.json`.
+ *
+ * Без токена доступен только публичный `raw.githubusercontent.com`. Для приватного
+ * репозитория он отдаёт 404, поэтому fallback на raw при наличии токена отключён:
+ * иначе лимит API молча превращался бы в «пустую ленту».
  */
 export async function readJson<T>(
   repo: RepoRef,
   path: string,
   token: string | null,
+  needSha = true,
 ): Promise<RemoteJson<T> | null> {
   if (!token) return readRaw<T>(repo, path);
+  if (!needSha) return readViaApiRaw<T>(repo, path, token);
 
   const res = await gh(`/repos/${repoSlug(repo)}/contents/${path}?ref=${DATA_BRANCH}`, token);
 
   if (res.status === 404) return null;
   if (res.status === 401) throw new GithubError(401, "Токен недействителен или истёк");
-  if (res.status === 403 || res.status === 429) return readRaw<T>(repo, path);
+  if (res.status === 403 || res.status === 429) throw new GithubError(res.status, RATE_LIMIT_MESSAGE);
   if (!res.ok) throw new GithubError(res.status, `Не удалось прочитать ${path}: ${await errorText(res)}`);
 
-  const j = (await res.json()) as { content?: string; sha?: string };
-  if (!j.content) return null;
+  const j = (await res.json()) as { content?: string; sha?: string; encoding?: string };
+  if (!j.content) {
+    // Файл больше 1 МБ: Contents API отдаёт encoding "none" и пустой content.
+    // Такие файлы обязан читать путь с `needSha: false`.
+    if (j.encoding === "none") {
+      throw new GithubError(
+        413,
+        `${path} больше 1 МБ — читай его через readViaApiRaw (needSha: false)`,
+      );
+    }
+    return null;
+  }
   return { data: JSON.parse(b64ToUtf8(j.content)) as T, sha: j.sha ?? "" };
 }
 

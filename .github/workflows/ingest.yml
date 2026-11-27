@@ -16,6 +16,9 @@ concurrency:
   group: ingest
   cancel-in-progress: false
 
+# contents: write нужен, когда данные лежат в этом же репозитории (форк без
+# своего приватного репо). Если заданы DATA_REPO + DATA_REPO_TOKEN, запись идёт
+# через PAT в другой репозиторий, а GITHUB_TOKEN не используется.
 permissions:
   contents: write
 
@@ -30,27 +33,47 @@ jobs:
         with:
           path: repo
 
-      # --- Ветка data: чекаутим в ./data_repo или создаём orphan при первом запуске
+      # --- Ветка data: цель определяется наличием секретов, без хардкода владельца.
+      # Заданы DATA_REPO + DATA_REPO_TOKEN → пишем в приватный репозиторий данных.
+      # Не заданы (форк, локальный проект) → пишем в этот же репозиторий.
       - name: Prepare data branch
         working-directory: repo
+        env:
+          DATA_REPO: ${{ secrets.DATA_REPO }}
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          SELF_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git ls-remote --exit-code --heads origin data > /dev/null 2>&1; then
+          if [ -n "${DATA_REPO}" ] && [ -n "${DATA_REPO_TOKEN}" ]; then
+            TARGET="${DATA_REPO}"
+            TOKEN="${DATA_REPO_TOKEN}"
+            echo "Данные: приватный репозиторий ${TARGET}"
+          else
+            TARGET="${SELF_REPO}"
+            TOKEN="${GITHUB_TOKEN}"
+            echo "Данные: текущий репозиторий ${TARGET}"
+          fi
+
+          # Токен не печатаем и не подставляем в URL: credential helper пишет
+          # одну строку в файл, который удаляется отдельным шагом.
+          git config --global credential.helper store
+          printf 'https://x-access-token:%s@github.com\n' "${TOKEN}" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+          REMOTE="https://github.com/${TARGET}.git"
+
+          if git ls-remote --exit-code --heads "${REMOTE}" data > /dev/null 2>&1; then
             echo "Ветка data существует — клонируем"
-            git clone --branch data --single-branch \
-              "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
-              data_repo
+            git clone --branch data --single-branch "${REMOTE}" data_repo
           else
             echo "Ветки data нет — создаём orphan"
             mkdir data_repo
             cd data_repo
             git init -q
             git checkout -q --orphan data
-            git remote add origin \
-              "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+            git remote add origin "${REMOTE}"
             # Пустой коммит, чтобы ветка существовала до первого прогона пайплайна
             git commit -q --allow-empty -m "chore: init data branch"
             git push -q origin data
@@ -115,3 +138,7 @@ jobs:
 
           echo "Не удалось запушить после 3 попыток" >&2
           exit 1
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f ~/.git-credentials

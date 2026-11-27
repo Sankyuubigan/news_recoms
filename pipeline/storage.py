@@ -31,10 +31,12 @@ DEDUP_LOOKBACK_DAYS = 14
 CLUSTER_LOOKBACK_HOURS = 48
 RUNS_KEEP = 30
 
-# Чтобы feed.json оставался лёгким (1–2 МБ на ~1000 элементов), исходный текст
-# храним урезанным. Для отображения хватает summary_ru, а для дообработки
-# pending_ai нужно чуть больше (в LLM уходит [:3000]).
-CONTENT_KEEP = 1200
+# Чтобы feed.json оставался лёгким, исходный текст храним урезанным.
+# Фронтенд content_orig не рендерит (использует summary_ru/key_points), а для
+# дообработки pending_ai нужен полный текст (в LLM уходит [:3000]).
+# Поэтому оценённым постам оставляем короткий сниппет: это в разы уменьшает
+# feed.json (важно — Contents API не отдаёт base64-файлы больше 1 МБ).
+CONTENT_KEEP = 300
 CONTENT_KEEP_PENDING = 3000
 
 DEFAULT_SETTINGS: dict[str, str] = {
