@@ -15,6 +15,7 @@ import {
   type RepoRef,
 } from "./github";
 import type {
+  ContentKind,
   DataConfig,
   FeedItem,
   FeedResponse,
@@ -81,6 +82,10 @@ export function nowIso(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
+function itemKind(item: { kind?: ContentKind }): ContentKind {
+  return item.kind === "repos" ? "repos" : "news";
+}
+
 // ------------------------------------------------------------------- store
 
 class FeedStore {
@@ -104,6 +109,8 @@ class FeedStore {
 
   private loaded = false;
   private loading: Promise<void> | null = null;
+  private flushing: Promise<void> | null = null;
+  private reflushRequested = false;
 
   // --------------------------------------------------------------- lifecycle
 
@@ -256,6 +263,7 @@ class FeedStore {
    */
   private filtered(params: {
     status: string;
+    kind?: ContentKind | "all";
     sort?: "score" | "date";
     category?: string;
     q?: string;
@@ -263,6 +271,10 @@ class FeedStore {
     let filtered = this.getMerged().filter(
       (it) => it.status !== "pending_ai" && it.status === params.status,
     );
+
+    if (params.kind && params.kind !== "all") {
+      filtered = filtered.filter((it) => itemKind(it) === params.kind);
+    }
 
     if (params.category && params.category !== "Все") {
       filtered = filtered.filter((it) => it.category === params.category);
@@ -274,7 +286,9 @@ class FeedStore {
         (it) =>
           (it.title_ru ?? "").toLowerCase().includes(q) ||
           (it.title_orig ?? "").toLowerCase().includes(q) ||
-          (it.summary_ru ?? "").toLowerCase().includes(q),
+          (it.summary_ru ?? "").toLowerCase().includes(q) ||
+          (it.repo_url ?? "").toLowerCase().includes(q) ||
+          (it.interface_type ?? "").toLowerCase().includes(q),
       );
     }
 
@@ -290,6 +304,7 @@ class FeedStore {
 
   getFeed(params: {
     status: string;
+    kind?: ContentKind | "all";
     sort: "score" | "date";
     category?: string;
     q?: string;
@@ -298,15 +313,35 @@ class FeedStore {
   }): FeedResponse {
     const all = this.getMerged();
 
-    const counts = { inbox: 0, saved: 0, archived: 0, rejected: 0, pending_ai: 0 };
+    const counts = {
+      inbox: 0,
+      news_inbox: 0,
+      repos_inbox: 0,
+      saved: 0,
+      archived: 0,
+      rejected: 0,
+      pending_ai: 0,
+    };
     for (const it of all) {
-      if (it.status in counts) counts[it.status as keyof typeof counts] += 1;
+      if (it.status === "inbox") {
+        counts.inbox += 1;
+        if (itemKind(it) === "repos") counts.repos_inbox += 1;
+        else counts.news_inbox += 1;
+      } else if (it.status in counts) {
+        counts[it.status as keyof typeof counts] += 1;
+      }
     }
 
     const categories = Array.from(
       new Set(
         all
-          .filter((it) => it.status === "inbox" && it.category && it.category !== "Общее")
+          .filter(
+            (it) =>
+              it.status === params.status &&
+              (!params.kind || params.kind === "all" || itemKind(it) === params.kind) &&
+              it.category &&
+              it.category !== "Общее",
+          )
           .map((it) => it.category as string),
       ),
     ).slice(0, 20);
@@ -324,7 +359,7 @@ class FeedStore {
   }
 
   /** ID ВСЕХ постов вкладки с учётом фильтров — для кнопки «Всё просмотрено». */
-  getFeedIds(params: { status: string; category?: string; q?: string }): string[] {
+  getFeedIds(params: { status: string; kind?: ContentKind | "all"; category?: string; q?: string }): string[] {
     return this.filtered(params).map((it) => it.id);
   }
 
@@ -389,10 +424,15 @@ class FeedStore {
     if (this.token) this.scheduleSync();
   }
 
-  bulkArchiveOlderThan(days: number): number {
+  bulkArchiveOlderThan(days: number, kind?: ContentKind | "all"): number {
     const cutoff = Date.now() - days * 86400_000;
     const ids = this.getMerged()
-      .filter((it) => it.status === "inbox" && new Date(it.published_at).getTime() < cutoff)
+      .filter(
+        (it) =>
+          it.status === "inbox" &&
+          (!kind || kind === "all" || itemKind(it) === kind) &&
+          new Date(it.published_at).getTime() < cutoff,
+      )
       .map((it) => it.id);
     if (ids.length) this.bulkArchive(ids);
     return ids.length;
@@ -443,13 +483,31 @@ class FeedStore {
       this.syncTimer = null;
     }
     if (!this.token || !this.repo) return;
+    if (this.flushing) {
+      this.reflushRequested = true;
+      return this.flushing;
+    }
     if (!Object.keys(this.pending).length && !this.pendingConfig) {
       if (this.syncStatus.state === "pending") this.setStatus("idle");
       return;
     }
 
-    this.setStatus("saving");
+    this.flushing = this.runFlush();
+    try {
+      await this.flushing;
+    } finally {
+      this.flushing = null;
+      if (this.reflushRequested) {
+        this.reflushRequested = false;
+        if (Object.keys(this.pending).length || this.pendingConfig) {
+          void this.flush();
+        }
+      }
+    }
+  }
 
+  private async runFlush(): Promise<void> {
+    this.setStatus("saving");
     try {
       if (Object.keys(this.pending).length) await this.flushUserState();
       if (this.pendingConfig) await this.flushConfig();

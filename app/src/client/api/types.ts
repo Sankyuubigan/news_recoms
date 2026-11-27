@@ -4,14 +4,27 @@ export type ItemStatus = "pending_ai" | "inbox" | "saved" | "archived" | "reject
 export type FeedbackValue = "none" | "like" | "dislike";
 export type SourceType = "telegram" | "rss" | "youtube";
 export type ContentType = "telegram" | "article" | "youtube";
+export type ContentKind = "news" | "repos";
+
+export interface BackfillConfig {
+  enabled: boolean;
+  stop_at_id?: number | null;
+  remaining?: number | null;
+  cursor_id?: number | null;
+  batch_limit?: number;
+  processed_total?: number;
+}
 
 export interface FeedItem {
   id: string;
+  kind?: ContentKind;
   source_identifier: string;
   source_name: string;
   source_type: SourceType;
   external_id: string | null;
   url: string;
+  repo_url?: string | null;
+  interface_type?: string | null;
   content_hash: string;
   content_type: ContentType;
   original_lang: string | null;
@@ -60,11 +73,13 @@ export interface UserState {
 export interface Source {
   id: number;
   type: SourceType;
+  kind?: ContentKind;
   name: string;
   identifier: string;
   category_hint: string;
   fetch_full_text: number;
   enabled: number;
+  backfill?: BackfillConfig | null;
   last_fetched_at: string | null;
   last_error: string | null;
   created_at: string;
@@ -103,6 +118,8 @@ export interface FeedResponse {
   total: number;
   counts: {
     inbox: number;
+    news_inbox: number;
+    repos_inbox: number;
     saved: number;
     archived: number;
     rejected: number;

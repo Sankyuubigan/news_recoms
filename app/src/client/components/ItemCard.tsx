@@ -1,4 +1,4 @@
-import { Check, ExternalLink, Plus, ThumbsDown, ThumbsUp, Bookmark, Trash2 } from "lucide-react";
+import { Bookmark, Check, ExternalLink, GitBranch, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
 import type { FeedItem } from "../api/client";
 import { isEnglish, relativeTime, scoreStyle, sourceLabel, sourceTint } from "../utils";
 import { useSwipe } from "../hooks/useSwipe";
@@ -19,6 +19,14 @@ interface Props {
   onAction: (action: ItemAction) => void;
 }
 
+function repoHostLabel(url: string): string {
+  if (/github\.com/i.test(url)) return "GitHub";
+  if (/gitlab\.com/i.test(url)) return "GitLab";
+  if (/codeberg\.org/i.test(url)) return "Codeberg";
+  if (/huggingface\.co/i.test(url)) return "HuggingFace";
+  return "Репозиторий";
+}
+
 export default function ItemCard({ item, highlighted, onAction }: Props) {
   const score = scoreStyle(item.ai_score);
   const swipe = useSwipe({
@@ -26,10 +34,10 @@ export default function ItemCard({ item, highlighted, onAction }: Props) {
     onSwipeLeft: () => onAction("dislike"),
   });
 
-  const inInbox = item.status === "inbox";
   const isSaved = item.status === "saved";
   const isRejected = item.status === "rejected";
-  void inInbox;
+  const isRepo = item.kind === "repos";
+  const primaryHref = isRepo && item.repo_url ? item.repo_url : item.url;
 
   return (
     <div className="relative">
@@ -70,6 +78,11 @@ export default function ItemCard({ item, highlighted, onAction }: Props) {
               EN → RU
             </span>
           )}
+          {isRepo && item.interface_type && (
+            <span className="rounded bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-300">
+              {item.interface_type}
+            </span>
+          )}
           {item.category && item.category !== "Общее" && (
             <span className="rounded bg-ink-700/70 px-1.5 py-0.5 text-[10.5px] text-slate-400">
               {item.category}
@@ -84,7 +97,7 @@ export default function ItemCard({ item, highlighted, onAction }: Props) {
 
         {/* Title */}
         <a
-          href={item.url}
+          href={primaryHref}
           target="_blank"
           rel="noopener noreferrer"
           className="group block text-[15.5px] font-semibold leading-snug text-slate-100 hover:text-emerald-300"
@@ -207,6 +220,18 @@ export default function ItemCard({ item, highlighted, onAction }: Props) {
           )}
 
           <div className="ml-auto flex items-center gap-1">
+            {item.repo_url && (
+              <a
+                href={item.repo_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 rounded-lg bg-emerald-500/10 px-2 py-1.5 text-[11.5px] font-medium text-emerald-300 transition hover:bg-emerald-500/20"
+                title={item.repo_url}
+              >
+                <GitBranch className="h-3.5 w-3.5" />
+                <span>{repoHostLabel(item.repo_url)}</span>
+              </a>
+            )}
             <button
               onClick={() => onAction("like")}
               className={`rounded-lg p-2 transition hover:bg-ink-800 ${

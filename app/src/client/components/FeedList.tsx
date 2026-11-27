@@ -1,10 +1,12 @@
 import { useEffect, useRef } from "react";
 import { Archive, ArrowDownWideNarrow, Flame, Loader2, RefreshCw, Search, Sparkles, Trash2 } from "lucide-react";
-import type { FeedItem } from "../api/client";
+import type { ContentKind, FeedItem } from "../api/client";
 import ItemCard, { type ItemAction } from "./ItemCard";
 
 interface Props {
   items: FeedItem[];
+  total: number;
+  hasMore: boolean;
   loading: boolean;
   sort: "score" | "date";
   category: string;
@@ -13,22 +15,35 @@ interface Props {
   tabLabel: string;
   /** На вкладке мусора набор кнопок другой: там не «просмотрено», а «очистить». */
   isRejectedTab: boolean;
+  isReposTab: boolean;
+  showKindFilter: boolean;
+  kindFilter: "all" | ContentKind;
   highlightedId: string | null;
   /** Сколько постов собрано, но ещё не прогнано через LLM. */
   pendingAi: number;
   onSortChange: (s: "score" | "date") => void;
   onCategoryChange: (c: string) => void;
+  onKindFilterChange: (k: "all" | ContentKind) => void;
   onQueryChange: (q: string) => void;
   onAction: (item: FeedItem, action: ItemAction) => void;
   onArchiveAll: () => void;
   onArchiveOlder: () => void;
   /** Есть только на вкладке «Мусор ИИ»: убрать всё отсечённое из виду. */
   onClearRejected: () => void;
+  onLoadMore: () => void;
   onRefresh: () => void;
 }
 
+const KIND_OPTIONS: Array<{ value: "all" | ContentKind; label: string }> = [
+  { value: "all", label: "Все" },
+  { value: "news", label: "Новости" },
+  { value: "repos", label: "Репозитории" },
+];
+
 export default function FeedList({
   items,
+  total,
+  hasMore,
   loading,
   sort,
   category,
@@ -36,15 +51,20 @@ export default function FeedList({
   query,
   tabLabel,
   isRejectedTab,
+  isReposTab,
+  showKindFilter,
+  kindFilter,
   highlightedId,
   pendingAi,
   onSortChange,
   onCategoryChange,
+  onKindFilterChange,
   onQueryChange,
   onAction,
   onArchiveAll,
   onArchiveOlder,
   onClearRejected,
+  onLoadMore,
   onRefresh,
 }: Props) {
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -62,7 +82,7 @@ export default function FeedList({
         <div className="mb-2.5 flex items-center gap-2">
           <h1 className="text-[16px] font-semibold tracking-tight text-white">{tabLabel}</h1>
           <span className="rounded-md bg-ink-800 px-1.5 py-0.5 text-[11px] tabular-nums text-slate-400">
-            {items.length}
+            {total}
           </span>
 
           <div className="ml-auto flex items-center gap-1">
@@ -81,14 +101,16 @@ export default function FeedList({
               {sort === "score" ? <Sparkles className="h-3.5 w-3.5" /> : <Flame className="h-3.5 w-3.5" />}
               <span className="hidden sm:inline">{sort === "score" ? "По рейтингу" : "Сначала свежие"}</span>
             </button>
-            <button
-              onClick={onArchiveOlder}
-              className="hidden items-center gap-1.5 rounded-lg px-2.5 py-2 text-[12px] text-slate-400 transition hover:bg-ink-850 hover:text-slate-200 sm:flex"
-              title="Смахнуть всё старше 3 дней в архив"
-            >
-              <ArrowDownWideNarrow className="h-3.5 w-3.5" />
-              <span className="hidden md:inline">Старше 3 дней</span>
-            </button>
+            {!isReposTab && !isRejectedTab && (
+              <button
+                onClick={onArchiveOlder}
+                className="hidden items-center gap-1.5 rounded-lg px-2.5 py-2 text-[12px] text-slate-400 transition hover:bg-ink-850 hover:text-slate-200 sm:flex"
+                title="Смахнуть новости старше 3 дней в архив"
+              >
+                <ArrowDownWideNarrow className="h-3.5 w-3.5" />
+                <span className="hidden md:inline">Старше 3 дней</span>
+              </button>
+            )}
             {isRejectedTab ? (
               <button
                 onClick={onClearRejected}
@@ -111,7 +133,7 @@ export default function FeedList({
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <div className="relative flex-1 sm:max-w-xs">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
             <input
@@ -121,6 +143,23 @@ export default function FeedList({
               className="w-full rounded-lg border border-ink-800 bg-ink-850 py-1.5 pl-8 pr-3 text-[12.5px] text-slate-200 outline-none transition placeholder:text-slate-600 focus:border-emerald-500/50"
             />
           </div>
+          {showKindFilter && (
+            <div className="flex rounded-lg border border-ink-800 bg-ink-900 p-0.5">
+              {KIND_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => onKindFilterChange(opt.value)}
+                  className={`rounded-md px-2.5 py-1 text-[11.5px] transition ${
+                    kindFilter === opt.value
+                      ? "bg-emerald-500/15 text-emerald-300"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         {categories.length > 0 && (
@@ -161,8 +200,9 @@ export default function FeedList({
                   Собрано {pendingAi} {pendingAi % 10 === 1 && pendingAi % 100 !== 11 ? "пост" : "постов"}, но их ещё не оценил ИИ
                 </p>
                 <p className="mt-1 max-w-sm text-[12.5px] leading-relaxed text-slate-500">
-                  Добавь в репозиторий секрет <code className="text-slate-400">LLM_PROVIDERS_JSON</code> и
-                  запусти сбор ещё раз — посты дообработаются и появятся здесь.
+                  Проверь ключи провайдеров в секретах репозитория (или{" "}
+                  <code className="text-slate-400">pipeline/providers.json</code>) и запусти сбор ещё раз —
+                  очередь дообработается и появится здесь.
                 </p>
               </>
             ) : (
@@ -193,6 +233,17 @@ export default function FeedList({
             </div>
           ))}
         </div>
+
+        {hasMore && (
+          <div className="mt-4 flex justify-center">
+            <button
+              onClick={onLoadMore}
+              className="rounded-lg border border-ink-800 bg-ink-850 px-4 py-2 text-[12.5px] text-slate-300 transition hover:border-ink-700 hover:bg-ink-800 hover:text-white"
+            >
+              Показать ещё (осталось {total - items.length})
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

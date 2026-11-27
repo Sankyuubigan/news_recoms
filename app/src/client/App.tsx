@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
-import { api, store, type FeedItem, type PipelineRun, type Source, type SyncStatus } from "./api/client";
+import {
+  api,
+  store,
+  type ContentKind,
+  type FeedItem,
+  type PipelineRun,
+  type Source,
+  type SyncStatus,
+} from "./api/client";
 import { getToken, setDataRepoOverride, setToken } from "./api/github";
 import { useKeyboardNav, type KeyAction } from "./hooks/useKeyboardNav";
 import SidebarNav, { type Tab } from "./components/SidebarNav";
@@ -14,7 +22,8 @@ import SyncModal from "./components/SyncModal";
 import SyncSettings from "./components/SyncSettings";
 
 const TAB_LABEL: Record<Tab, string> = {
-  inbox: "Новое",
+  inbox: "Новости",
+  repos: "Репозитории",
   saved: "Отложено",
   archived: "Архив",
   rejected: "Мусор ИИ",
@@ -52,8 +61,12 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("Источники");
 
   const [items, setItems] = useState<FeedItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [limit, setLimit] = useState(60);
   const [counts, setCounts] = useState({
     inbox: 0,
+    news_inbox: 0,
+    repos_inbox: 0,
     saved: 0,
     archived: 0,
     rejected: 0,
@@ -64,6 +77,7 @@ export default function App() {
 
   const [sort, setSort] = useState<"score" | "date">("score");
   const [category, setCategory] = useState("Все");
+  const [kindFilter, setKindFilter] = useState<"all" | ContentKind>("all");
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
 
@@ -105,19 +119,41 @@ export default function App() {
     return () => clearTimeout(t);
   }, [query]);
 
+  const activeStatus = tab === "repos" ? "inbox" : tab;
+  const activeKind: "all" | ContentKind =
+    tab === "inbox" ? "news" : tab === "repos" ? "repos" : kindFilter;
+
+  const handleTabChange = (next: Tab) => {
+    setTab(next);
+    setCategory("Все");
+    setLimit(60);
+  };
+
+  useEffect(() => {
+    setLimit(60);
+  }, [category, kindFilter, debouncedQuery]);
+
   // --- feed load ---
   const loadFeed = useCallback(async () => {
     if (tab === "settings") return;
     setLoading(true);
     try {
-      const res = await api.feed({ status: tab, sort, category, q: debouncedQuery, limit: 60 });
+      const res = await api.feed({
+        status: activeStatus,
+        kind: activeKind,
+        sort,
+        category,
+        q: debouncedQuery,
+        limit,
+      });
       setItems(res.items);
+      setTotal(res.total);
       setCounts(res.counts);
       setCategories(res.categories);
     } finally {
       setLoading(false);
     }
-  }, [tab, sort, category, debouncedQuery]);
+  }, [tab, activeStatus, activeKind, sort, category, debouncedQuery, limit]);
 
   useEffect(() => {
     if (ready) void loadFeed();
@@ -174,7 +210,11 @@ export default function App() {
         break;
       }
       case "open":
-        window.open(item.url, "_blank", "noopener,noreferrer");
+        window.open(
+          item.kind === "repos" && item.repo_url ? item.repo_url : item.url,
+          "_blank",
+          "noopener,noreferrer",
+        );
         break;
     }
   };
@@ -205,14 +245,19 @@ export default function App() {
   const archiveAll = async () => {
     // Берём ID ВСЕЙ вкладки, а не только загруженных 60: иначе в архиве
     // оставались бы сотни непросмотренных, которые просто не попали в экран.
-    const ids = await api.feedIds({ status: tab, category, q: debouncedQuery });
+    const ids = await api.feedIds({
+      status: activeStatus,
+      kind: activeKind,
+      category,
+      q: debouncedQuery,
+    });
     if (!ids.length) return;
     await api.bulk("archive_ids", { ids });
     void loadFeed();
   };
 
   const archiveOlder = async () => {
-    await api.bulk("archive_older_than", { days: 3 });
+    await api.bulk("archive_older_than", { days: 3, kind: "news" });
     void loadFeed();
   };
 
@@ -289,7 +334,7 @@ export default function App() {
         <SidebarNav
           tab={tab}
           counts={counts}
-          onChange={setTab}
+          onChange={handleTabChange}
           onOpenSync={() => setSyncModalOpen(true)}
           synced={hasToken}
         />
@@ -298,6 +343,8 @@ export default function App() {
           {tab !== "settings" ? (
             <FeedList
               items={items}
+              total={total}
+              hasMore={items.length < total}
               loading={loading}
               sort={sort}
               category={category}
@@ -305,15 +352,20 @@ export default function App() {
               query={query}
               tabLabel={TAB_LABEL[tab]}
               isRejectedTab={tab === "rejected"}
+              isReposTab={tab === "repos"}
+              showKindFilter={tab === "saved" || tab === "archived" || tab === "rejected"}
+              kindFilter={kindFilter}
               highlightedId={highlightedId}
               pendingAi={counts.pending_ai}
               onSortChange={setSort}
               onCategoryChange={setCategory}
+              onKindFilterChange={setKindFilter}
               onQueryChange={setQuery}
               onAction={handleItemAction}
               onArchiveAll={archiveAll}
               onArchiveOlder={archiveOlder}
               onClearRejected={clearRejected}
+              onLoadMore={() => setLimit((prev) => prev + 60)}
               onRefresh={refresh}
             />
           ) : (

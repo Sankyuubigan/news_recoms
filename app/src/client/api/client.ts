@@ -6,6 +6,8 @@
 import { dispatchIngest, getRepo, getToken, type RepoRef } from "./github";
 import { store, nowIso } from "./store";
 import type {
+  BackfillConfig,
+  ContentKind,
   DataConfig,
   FeedItem,
   FeedResponse,
@@ -17,6 +19,8 @@ import type {
 } from "./types";
 
 export type {
+  BackfillConfig,
+  ContentKind,
   DataConfig,
   FeedItem,
   FeedResponse,
@@ -34,6 +38,7 @@ export const api = {
 
   async feed(params: {
     status: string;
+    kind?: ContentKind | "all";
     sort: "score" | "date";
     category?: string;
     q?: string;
@@ -45,7 +50,12 @@ export const api = {
   },
 
   /** ID всех постов вкладки (не только загруженных 60) — для «Всё просмотрено». */
-  async feedIds(params: { status: string; category?: string; q?: string }): Promise<string[]> {
+  async feedIds(params: {
+    status: string;
+    kind?: ContentKind | "all";
+    category?: string;
+    q?: string;
+  }): Promise<string[]> {
     await store.load();
     return store.getFeedIds(params);
   },
@@ -83,7 +93,11 @@ export const api = {
     }
     if (action === "archive_older_than") {
       const days = Number(payload.days ?? 3);
-      return { ok: true, updated: store.bulkArchiveOlderThan(Number.isFinite(days) ? days : 3) };
+      const kind = payload.kind as ContentKind | "all" | undefined;
+      return {
+        ok: true,
+        updated: store.bulkArchiveOlderThan(Number.isFinite(days) ? days : 3, kind),
+      };
     }
     if (action === "purge_rejected_older_than") {
       const days = Number(payload.days ?? 0);
@@ -96,10 +110,12 @@ export const api = {
 
   async createSource(body: {
     type: SourceType;
+    kind?: ContentKind;
     identifier: string;
     name?: string;
     category_hint?: string;
     fetch_full_text?: boolean;
+    backfill?: BackfillConfig | null;
   }): Promise<{ ok: boolean; source: Source }> {
     await store.load();
     const config = store.getConfig();
@@ -116,11 +132,13 @@ export const api = {
     const source: Source = {
       id: nextId,
       type: body.type,
+      kind: body.kind === "repos" ? "repos" : "news",
       name: (body.name ?? "").trim() || identifier,
       identifier,
       category_hint: body.category_hint ?? "",
       fetch_full_text: body.fetch_full_text ? 1 : 0,
       enabled: 1,
+      ...(body.backfill ? { backfill: body.backfill } : {}),
       last_fetched_at: null,
       last_error: null,
       created_at: nowIso(),
@@ -143,12 +161,16 @@ export const api = {
       if (s.id !== id) return s;
       const next: Source = { ...s };
       if (body.name !== undefined) next.name = String(body.name).trim() || s.name;
+      if (body.kind === "news" || body.kind === "repos") next.kind = body.kind;
       if (body.identifier !== undefined) {
         next.identifier = normalizeIdentifier(s.type, String(body.identifier));
       }
       if (body.category_hint !== undefined) next.category_hint = String(body.category_hint);
       if (body.fetch_full_text !== undefined) next.fetch_full_text = body.fetch_full_text ? 1 : 0;
       if (body.enabled !== undefined) next.enabled = body.enabled ? 1 : 0;
+      if (body.backfill !== undefined) {
+        next.backfill = body.backfill as BackfillConfig | null;
+      }
       return next;
     });
 
@@ -221,4 +243,13 @@ export function normalizeIdentifier(type: SourceType, raw: string): string {
     return v;
   }
   return v;
+}
+
+/** Извлекает числовой ID поста из ссылки `https://t.me/channel/4120` или строки `"4120"`. */
+export function parseTelegramPostId(raw: string): number | null {
+  const v = (raw ?? "").trim();
+  if (!v) return null;
+  if (/^\d+$/.test(v)) return Number(v);
+  const m = /t\.me\/(?:s\/)?[A-Za-z0-9_]+\/(\d+)/i.exec(v);
+  return m ? Number(m[1]) : null;
 }

@@ -1,11 +1,13 @@
-import { Bookmark, CheckCircle2, Flame, KeyRound, Settings, Trash2 } from "lucide-react";
+import { Bookmark, CheckCircle2, Flame, KeyRound, Package, Settings, Trash2 } from "lucide-react";
 
-export type Tab = "inbox" | "saved" | "archived" | "rejected" | "settings";
+export type Tab = "inbox" | "repos" | "saved" | "archived" | "rejected" | "settings";
 
 interface Props {
   tab: Tab;
   counts: {
     inbox: number;
+    news_inbox: number;
+    repos_inbox: number;
     saved: number;
     archived: number;
     rejected: number;
@@ -17,11 +19,12 @@ interface Props {
 }
 
 const ITEMS: Array<{ id: Tab; label: string; short: string; icon: typeof Flame; countKey?: keyof Props["counts"] }> = [
-  { id: "inbox", label: "Новое", short: "Новое", icon: Flame, countKey: "inbox" },
-  { id: "saved", label: "Отложено", short: "Отложено", icon: Bookmark, countKey: "saved" },
+  { id: "inbox", label: "Новости", short: "Новости", icon: Flame, countKey: "news_inbox" },
+  { id: "repos", label: "Репозитории", short: "Репы", icon: Package, countKey: "repos_inbox" },
+  { id: "saved", label: "Отложено", short: "Позже", icon: Bookmark, countKey: "saved" },
   { id: "archived", label: "Архив", short: "Архив", icon: CheckCircle2, countKey: "archived" },
   { id: "rejected", label: "Мусор ИИ", short: "Мусор", icon: Trash2, countKey: "rejected" },
-  { id: "settings", label: "Настройки", short: "Настройки", icon: Settings },
+  { id: "settings", label: "Настройки", short: "Ещё", icon: Settings },
 ];
 
 export default function SidebarNav({ tab, counts, onChange, onOpenSync, synced }: Props) {
@@ -87,14 +90,14 @@ export default function SidebarNav({ tab, counts, onChange, onOpenSync, synced }
             <button
               key={id}
               onClick={() => onChange(id)}
-              className={`relative flex flex-1 flex-col items-center gap-1 py-2.5 text-[10px] transition ${
+              className={`relative flex flex-1 flex-col items-center gap-0.5 py-2.5 text-[9.5px] transition ${
                 active ? "text-emerald-400" : "text-slate-500"
               }`}
             >
-              <Icon className="h-5 w-5" />
+              <Icon className="h-4.5 w-4.5" />
               <span>{short}</span>
               {countKey && count > 0 && (
-                <span className="absolute right-1/2 top-1 translate-x-3.5 rounded-full bg-emerald-500 px-1.5 py-px text-[9px] font-bold leading-tight text-ink-950">
+                <span className="absolute right-1/2 top-1 translate-x-3 rounded-full bg-emerald-500 px-1 py-px text-[8.5px] font-bold leading-tight text-ink-950">
                   {count > 99 ? "99+" : count}
                 </span>
               )}
