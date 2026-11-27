@@ -64,11 +64,20 @@ jobs:
           chmod 600 ~/.git-credentials
           REMOTE="https://github.com/${TARGET}.git"
 
-          if git ls-remote --exit-code --heads "${REMOTE}" data > /dev/null 2>&1; then
-            echo "Ветка data существует — клонируем"
-            git clone --branch data --single-branch "${REMOTE}" data_repo
+          # actions/checkout оставляет глобальный http.extraheader с GITHUB_TOKEN,
+          # который перекрывает credential helper: запросы к приватному репо шли
+          # с чужим токеном и получали 404 → «ветки нет» на существующей ветке.
+          git config --global --unset-all http.https://github.com/.extraheader || true
+          export GIT_TERMINAL_PROMPT=0
+
+          # Наличие ветки определяем клонированием, а не ls-remote: так проверяется
+          # ровно тот путь доступа, которым потом идёт push.
+          rm -rf data_repo
+          if git clone --quiet --branch data --single-branch "${REMOTE}" data_repo; then
+            echo "Ветка data существует — клонировали"
           else
             echo "Ветки data нет — создаём orphan"
+            rm -rf data_repo
             mkdir data_repo
             cd data_repo
             git init -q
