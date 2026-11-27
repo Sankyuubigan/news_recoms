@@ -307,6 +307,32 @@ class Storage:
             "next_source_id", max((s.get("id", 0) for s in self.config["sources"]), default=0) + 1
         )
 
+        self._migrate_drop_content_orig()
+
+    def _migrate_drop_content_orig(self) -> None:
+        """Разовая миграция: обнуляет content_orig у уже оценённых строк.
+
+        Зачем: правило «полный текст живёт только у pending_ai» применяется в
+        `_build_row`, но строки, оценённые ДО этой правки, в базу уже попали с
+        полным текстом. Плюс `_apply_scored_fields` (переход pending_ai → inbox/
+        rejected) текст не чистит — иначе он понадобился бы снова при повторной
+        оценке. В итоге feed.json пухнет на ~2.7 КБ на пост.
+
+        Здесь проходим один раз при загрузке: если у строки есть статус (то есть
+        она уже оценена), текст ей больше не нужен — фронтенд его не рендерит,
+        а для LLM он берётся только у pending_ai.
+        """
+        dropped = 0
+        for row in self.feed:
+            if row.get("status") == "pending_ai":
+                continue
+            if row.get("content_orig"):
+                row["content_orig"] = ""
+                dropped += 1
+        if dropped:
+            log.info("storage: dropped content_orig from %d scored rows", dropped)
+            self._dirty_feed = True
+
     def _load_or_init(self, name: str, default: Any) -> Any:
         path = self.dir / name
         if not path.exists():
@@ -727,6 +753,9 @@ class Storage:
             if value is not None:
                 row[field] = list(value) if isinstance(value, list) else value
         row["status"] = item.status
+        # Пост вышел из очереди оценки — полный текст больше не нужен.
+        # Без этого feed.json копил бы ~2.7 КБ на каждый обработанный пост.
+        row["content_orig"] = ""
         row["updated_at"] = now
 
     def _add_merged_source(self, row: dict[str, Any], item: IngestItem, now: str) -> None:

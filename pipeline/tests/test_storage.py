@@ -323,6 +323,36 @@ def test_content_orig_dropped_for_scored_items(store: Storage) -> None:
     assert by_url["https://example.com/pending"]["content_orig"] == "Body text"
 
 
+def test_apply_scored_fields_drops_content_orig(store: Storage) -> None:
+    """Пост выходит из pending_ai — текст должен исчезнуть сразу, а не при след. загрузке."""
+    store.ingest([_item("https://example.com/p", status="pending_ai")])
+    assert store.feed[0]["content_orig"] == "Body text"
+
+    store.ingest([_item("https://example.com/p", status="inbox", score=7.0)])
+    assert store.feed[0]["status"] == "inbox"
+    assert store.feed[0]["content_orig"] == ""
+
+
+def test_load_drops_content_orig_from_legacy_rows(store: Storage) -> None:
+    """Строки, оценённые ДО правки, при загрузке очищаются; pending_ai — нет."""
+    store.ingest(
+        [
+            _item("https://example.com/scored", status="inbox"),
+            _item("https://example.com/pending", status="pending_ai"),
+        ]
+    )
+    # Эмулируем старую базу: у оценённой строки текст ещё лежал.
+    for row in store.feed:
+        row["content_orig"] = "Legacy full text"
+    store._dirty_feed = True
+    store.save()
+
+    reopened = Storage(str(store.dir))
+    by_url = {it["url"]: it for it in reopened.feed}
+    assert by_url["https://example.com/scored"]["content_orig"] == ""
+    assert by_url["https://example.com/pending"]["content_orig"] == "Legacy full text"
+
+
 def test_feed_written_compact(store: Storage) -> None:
     store.ingest([_item("https://example.com/a")])
     store.save()
