@@ -1,6 +1,17 @@
 import { useEffect, useRef } from "react";
-import { Archive, ArrowDownWideNarrow, Flame, Loader2, RefreshCw, Search, Sparkles, Trash2 } from "lucide-react";
-import type { ContentKind, FeedItem } from "../api/client";
+import {
+  Archive,
+  ArrowDownWideNarrow,
+  Flame,
+  Loader2,
+  RefreshCw,
+  Search,
+  Sparkles,
+  ThumbsDown,
+  ThumbsUp,
+  Trash2,
+} from "lucide-react";
+import type { ContentKind, FeedbackFilter, FeedItem } from "../api/client";
 import ItemCard, { type ItemAction } from "./ItemCard";
 
 interface Props {
@@ -18,12 +29,16 @@ interface Props {
   isReposTab: boolean;
   showKindFilter: boolean;
   kindFilter: "all" | ContentKind;
+  /** Фильтр реакции — только в «Архиве» (👍 Понравилось / 👎 Скрытые). */
+  showFeedbackFilter: boolean;
+  feedbackFilter: FeedbackFilter;
   highlightedId: string | null;
   /** Сколько постов собрано, но ещё не прогнано через LLM. */
   pendingAi: number;
   onSortChange: (s: "score" | "date") => void;
   onCategoryChange: (c: string) => void;
   onKindFilterChange: (k: "all" | ContentKind) => void;
+  onFeedbackFilterChange: (f: FeedbackFilter) => void;
   onQueryChange: (q: string) => void;
   onAction: (item: FeedItem, action: ItemAction) => void;
   onArchiveAll: () => void;
@@ -40,6 +55,17 @@ const KIND_OPTIONS: Array<{ value: "all" | ContentKind; label: string }> = [
   { value: "repos", label: "Репозитории" },
 ];
 
+/** Чипы реакции для «Архива». Иконки те же, что на карточке — узнаваемо. */
+const FEEDBACK_OPTIONS: Array<{
+  value: FeedbackFilter;
+  label: string;
+  Icon: typeof ThumbsUp | null;
+}> = [
+  { value: "all", label: "Все", Icon: null },
+  { value: "like", label: "Понравилось", Icon: ThumbsUp },
+  { value: "dislike", label: "Скрытые", Icon: ThumbsDown },
+];
+
 export default function FeedList({
   items,
   total,
@@ -54,11 +80,14 @@ export default function FeedList({
   isReposTab,
   showKindFilter,
   kindFilter,
+  showFeedbackFilter,
+  feedbackFilter,
   highlightedId,
   pendingAi,
   onSortChange,
   onCategoryChange,
   onKindFilterChange,
+  onFeedbackFilterChange,
   onQueryChange,
   onAction,
   onArchiveAll,
@@ -158,6 +187,33 @@ export default function FeedList({
                   {opt.label}
                 </button>
               ))}
+            </div>
+          )}
+          {showFeedbackFilter && (
+            <div className="flex rounded-lg border border-ink-800 bg-ink-900 p-0.5">
+              {FEEDBACK_OPTIONS.map((opt) => {
+                const active = feedbackFilter === opt.value;
+                const Icon = opt.Icon;
+                const activeColor =
+                  opt.value === "like"
+                    ? "bg-emerald-500/15 text-emerald-300"
+                    : opt.value === "dislike"
+                      ? "bg-rose-500/15 text-rose-300"
+                      : "bg-emerald-500/15 text-emerald-300";
+                return (
+                  <button
+                    key={opt.value}
+                    onClick={() => onFeedbackFilterChange(opt.value)}
+                    className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-[11.5px] transition ${
+                      active ? activeColor : "text-slate-400 hover:text-slate-200"
+                    }`}
+                    title={opt.value === "all" ? "Показать всё в архиве" : `Только «${opt.label}»`}
+                  >
+                    {Icon && <Icon className="h-3 w-3" />}
+                    {opt.label}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>

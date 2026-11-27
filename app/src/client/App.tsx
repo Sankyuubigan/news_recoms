@@ -4,6 +4,7 @@ import {
   api,
   store,
   type ContentKind,
+  type FeedbackFilter,
   type FeedItem,
   type PipelineRun,
   type Source,
@@ -78,6 +79,8 @@ export default function App() {
   const [sort, setSort] = useState<"score" | "date">("score");
   const [category, setCategory] = useState("Все");
   const [kindFilter, setKindFilter] = useState<"all" | ContentKind>("all");
+  // Фильтр по реакции — живёт только во вкладке «Архив» (👍 Понравилось / 👎 Скрытые).
+  const [feedbackFilter, setFeedbackFilter] = useState<FeedbackFilter>("all");
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
 
@@ -127,11 +130,14 @@ export default function App() {
     setTab(next);
     setCategory("Все");
     setLimit(60);
+    // Фильтр реакции имеет смысл только в архиве — в других вкладках сбрасываем,
+    // иначе он незаметно сузит ленту после возврата.
+    setFeedbackFilter("all");
   };
 
   useEffect(() => {
     setLimit(60);
-  }, [category, kindFilter, debouncedQuery]);
+  }, [category, kindFilter, feedbackFilter, debouncedQuery]);
 
   // --- feed load ---
   const loadFeed = useCallback(async () => {
@@ -144,6 +150,8 @@ export default function App() {
         sort,
         category,
         q: debouncedQuery,
+        // Только архив умеет фильтровать по реакции; в остальных вкладках — все.
+        feedback: activeStatus === "archived" ? feedbackFilter : "all",
         limit,
       });
       setItems(res.items);
@@ -153,7 +161,16 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [tab, activeStatus, activeKind, sort, category, debouncedQuery, limit]);
+  }, [
+    tab,
+    activeStatus,
+    activeKind,
+    sort,
+    category,
+    debouncedQuery,
+    feedbackFilter,
+    limit,
+  ]);
 
   useEffect(() => {
     if (ready) void loadFeed();
@@ -189,11 +206,27 @@ export default function App() {
         patchItem(item.id, { status: item.status === "saved" ? "inbox" : "saved" });
         break;
       case "like": {
-        // Лайк ставим сразу, а причину — если захочет, в тосте.
-        patchItem(item.id, { feedback: item.feedback === "like" ? "none" : "like" });
-        if (item.feedback !== "like") {
-          setFeedback({ itemId: item.id, title: item.title_ru || item.title_orig, kind: "like" });
+        // Лайк — это «оценено и просмотрено». Из входящих уводим в архив
+        // (Inbox Zero), из отложенного/архива только переключаем флаг, чтобы
+        // карточка не пропадала из закладок без спроса. В мусоре остаётся
+        // отдельная кнопка «В ленту».
+        if (item.feedback === "like") {
+          // Снятие лайка: статус не трогаем — где лежало, там и остаётся.
+          patchItem(item.id, { feedback: "none" });
+          break;
         }
+        if (item.status === "inbox") {
+          patchItem(item.id, { feedback: "like", status: "archived" });
+          setItems((prev) => prev.filter((it) => it.id !== item.id));
+        } else {
+          patchItem(item.id, { feedback: "like" });
+        }
+        setFeedback({
+          itemId: item.id,
+          title: item.title_ru || item.title_orig,
+          kind: "like",
+          prevStatus: item.status,
+        });
         break;
       }
       case "restore":
@@ -204,7 +237,12 @@ export default function App() {
         patchItem(item.id, { status: "archived" });
         break;
       case "dislike": {
-        setFeedback({ itemId: item.id, title: item.title_ru || item.title_orig, kind: "dislike" });
+        setFeedback({
+          itemId: item.id,
+          title: item.title_ru || item.title_orig,
+          kind: "dislike",
+          prevStatus: item.status,
+        });
         patchItem(item.id, { feedback: "dislike", status: "archived" });
         setItems((prev) => prev.filter((it) => it.id !== item.id));
         break;
@@ -225,7 +263,7 @@ export default function App() {
     store.patchItem(feedback.itemId, {
       feedback: kind,
       feedback_reason: reason,
-      // Дизлайк уже увёл пост в архив, лайк статус не меняет.
+      // Дизлайк всегда уводит в архив; лайк статус уже выставлен в handleItemAction.
       ...(kind === "dislike" ? { status: "archived" as const } : {}),
     });
     setFeedback(null);
@@ -233,11 +271,12 @@ export default function App() {
 
   const handleUndoFeedback = () => {
     if (!feedback) return;
-    const kind = feedback.kind;
+    // Возвращаем ровно туда, где карточка была до реакции: лайк из входящих
+    // уводит её в архив, и без этого «Отменить» не вернуло бы её в ленту.
     patchItem(feedback.itemId, {
       feedback: "none",
       feedback_reason: null,
-      ...(kind === "dislike" ? { status: "inbox" as const } : {}),
+      status: feedback.prevStatus ?? "inbox",
     });
     setFeedback(null);
   };
@@ -250,6 +289,7 @@ export default function App() {
       kind: activeKind,
       category,
       q: debouncedQuery,
+      feedback: activeStatus === "archived" ? feedbackFilter : "all",
     });
     if (!ids.length) return;
     await api.bulk("archive_ids", { ids });
@@ -355,11 +395,14 @@ export default function App() {
               isReposTab={tab === "repos"}
               showKindFilter={tab === "saved" || tab === "archived" || tab === "rejected"}
               kindFilter={kindFilter}
+              showFeedbackFilter={tab === "archived"}
+              feedbackFilter={feedbackFilter}
               highlightedId={highlightedId}
               pendingAi={counts.pending_ai}
               onSortChange={setSort}
               onCategoryChange={setCategory}
               onKindFilterChange={setKindFilter}
+              onFeedbackFilterChange={setFeedbackFilter}
               onQueryChange={setQuery}
               onAction={handleItemAction}
               onArchiveAll={archiveAll}

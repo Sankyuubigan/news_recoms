@@ -68,7 +68,7 @@ def test_missing_settings_keys_are_filled(tmp_path: Path) -> None:
     )
     store = Storage(tmp_path)
     assert store.settings["manual_rules"] == "только ИИ"
-    assert store.settings["learn_feedback_threshold"] == "10"
+    assert store.settings["learn_feedback_threshold"] == "5"
 
 
 def test_corrupt_file_is_backed_up(tmp_path: Path) -> None:
@@ -166,6 +166,7 @@ def test_merge_user_state_ignores_older_changes(store: Storage) -> None:
     item_id = store.feed[0]["id"]
     store.feed[0]["status"] = "saved"
     store.feed[0]["updated_at"] = _iso()
+    store.feed[0]["user_state_applied_at"] = _iso(-1)  # уже применено более новое
 
     store.user_state["items"][item_id] = {
         "status": "archived",
@@ -173,6 +174,62 @@ def test_merge_user_state_ignores_older_changes(store: Storage) -> None:
     }
     assert store.merge_user_state() == 0
     assert store.feed[0]["status"] == "saved"
+
+
+def test_merge_user_state_survives_pipeline_bump(store: Storage) -> None:
+    """Крон сдвинул updated_at после лайка — лайк всё равно должен примениться.
+
+    Раньше сравнение шло с item.updated_at, и обновление поста пайплайном
+    «съедало» реакцию пользователя.
+    """
+    store.ingest([_item("https://example.com/a")])
+    item_id = store.feed[0]["id"]
+    # Пайплайн только что переписал строку (updated_at новее реакции).
+    store.feed[0]["updated_at"] = _iso(-1)
+    store.user_state["items"][item_id] = {
+        "status": "archived",
+        "feedback": "like",
+        "feedback_reason": "Моя тема",
+        "updated_at": _iso(0.5),  # старее updated_at, но ещё не применялось
+    }
+
+    assert store.merge_user_state() == 1
+    assert store.feed[0]["feedback"] == "like"
+    assert store.feed[0]["feedback_reason"] == "Моя тема"
+    assert store.feed[0]["user_state_applied_at"] == _iso(0.5)
+
+
+def test_merge_user_state_resets_processed_on_new_feedback(store: Storage) -> None:
+    store.ingest([_item("https://example.com/a")])
+    item_id = store.feed[0]["id"]
+    store.feed[0]["feedback_processed"] = True
+
+    store.user_state["items"][item_id] = {
+        "feedback": "dislike",
+        "feedback_processed": True,  # значение из user_state не должно затирать логику
+        "updated_at": _iso(-1),
+    }
+
+    store.merge_user_state()
+    # Новая реакция ещё не учтена в профиле.
+    assert store.feed[0]["feedback_processed"] is False
+
+
+def test_merge_user_state_keeps_processed_when_nothing_changed(store: Storage) -> None:
+    """Повторный merge не должен сбрасывать feedback_processed у learner."""
+    store.ingest([_item("https://example.com/a")])
+    item_id = store.feed[0]["id"]
+    store.feed[0]["feedback"] = "like"
+    store.feed[0]["feedback_processed"] = True
+    store.feed[0]["user_state_applied_at"] = _iso(-2)
+
+    store.user_state["items"][item_id] = {
+        "feedback": "like",
+        "updated_at": _iso(1),  # старее применённой метки
+    }
+
+    assert store.merge_user_state() == 0
+    assert store.feed[0]["feedback_processed"] is True
 
 
 def test_unprocessed_feedback_collects_likes(store: Storage) -> None:
@@ -225,6 +282,53 @@ def test_prune_removes_old_rejected_but_keeps_saved(store: Storage) -> None:
     assert "https://example.com/backfilled-rejected" in urls
     assert "https://example.com/old-saved" in urls
     assert "https://example.com/fresh" in urls
+
+
+def test_prune_keeps_liked_even_when_old(store: Storage) -> None:
+    """Лайкнутое не должно исчезать из архива через месяц — это подборка."""
+    store.ingest(
+        [
+            _item("https://example.com/liked", status="archived"),
+            _item("https://example.com/plain", status="archived"),
+        ]
+    )
+    for it in store.feed:
+        it["fetched_at"] = _iso(90)  # старше ARCHIVED_TTL_DAYS
+        if it["url"].endswith("/liked"):
+            it["feedback"] = "like"
+
+    import storage as storage_mod
+
+    original = storage_mod.FEED_MAX_ITEMS
+    storage_mod.FEED_MAX_ITEMS = 1  # заставляем prune включиться
+    try:
+        store.prune()
+    finally:
+        storage_mod.FEED_MAX_ITEMS = original
+
+    urls = {it["url"] for it in store.feed}
+    assert "https://example.com/liked" in urls
+    assert "https://example.com/plain" not in urls
+
+
+def test_content_orig_dropped_for_scored_items(store: Storage) -> None:
+    store.ingest(
+        [
+            _item("https://example.com/scored", status="inbox"),
+            _item("https://example.com/pending", status="pending_ai"),
+        ]
+    )
+    by_url = {it["url"]: it for it in store.feed}
+    assert by_url["https://example.com/scored"]["content_orig"] == ""
+    assert by_url["https://example.com/pending"]["content_orig"] == "Body text"
+
+
+def test_feed_written_compact(store: Storage) -> None:
+    store.ingest([_item("https://example.com/a")])
+    store.save()
+    raw = (store.dir / FEED_FILE).read_text(encoding="utf-8")
+    assert "\n  " not in raw  # без indent
+    assert json.loads(raw)[0]["url"] == "https://example.com/a"
 
 
 def test_prune_keeps_separate_limits_for_news_and_repos(store: Storage) -> None:

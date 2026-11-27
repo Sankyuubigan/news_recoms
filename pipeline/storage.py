@@ -31,12 +31,12 @@ DEDUP_LOOKBACK_DAYS = 14
 CLUSTER_LOOKBACK_HOURS = 48
 RUNS_KEEP = 30
 
-# Чтобы feed.json оставался лёгким, исходный текст храним урезанным.
-# Фронтенд content_orig не рендерит (использует summary_ru/key_points), а для
+# Чтобы feed.json оставался лёгким, исходный текст НЕ храним у оценённых постов:
+# фронтенд content_orig не рендерит (использует summary_ru/key_points), а для
 # дообработки pending_ai нужен полный текст (в LLM уходит [:3000]).
-# Поэтому оценённым постам оставляем короткий сниппет: это в разы уменьшает
-# feed.json (важно — Contents API не отдаёт base64-файлы больше 1 МБ).
-CONTENT_KEEP = 300
+# Поэтому полный текст живёт только у pending_ai, остальным — пустая строка.
+# Это важно: feed.json уже перевалил за 1 МБ, а Contents API не отдаёт base64
+# больше 1 МБ (читаем через raw+json, но размер влияет и на мобильную загрузку).
 CONTENT_KEEP_PENDING = 3000
 
 DEFAULT_SETTINGS: dict[str, str] = {
@@ -77,7 +77,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "min_inbox_score": "6.5",
     "min_repos_score": "6.5",
     "telegram_alert_score": "9.0",
-    "learn_feedback_threshold": "10",
+    "learn_feedback_threshold": "5",
     "youtube_deep_summary_enabled": "true",
     "youtube_deep_summary_min_score": "7.5",
 }
@@ -212,9 +212,17 @@ def _parse_iso(value: Any) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def _atomic_write(path: Path, payload: Any) -> None:
-    """Атомарная запись JSON: temp-файл в том же каталоге + os.replace."""
-    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+def _atomic_write(path: Path, payload: Any, *, compact: bool = False) -> None:
+    """Атомарная запись JSON: temp-файл в том же каталоге + os.replace.
+
+    `compact` — без отступов и пробелов. Нужен для feed.json: он самый большой
+    (сотни постов) и целиком уходит в браузер; config/user_state/runs остаются
+    читаемыми, потому что их правят руками в вебе GitHub.
+    """
+    if compact:
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    else:
+        text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
@@ -414,7 +422,14 @@ class Storage:
     def merge_user_state(self) -> int:
         """Переносит статусы/фидбек из user_state.json в feed.json.
 
-        Правило: user_state главнее, если его updated_at новее, чем у элемента ленты.
+        Field-level ownership: пайплайн владеет AI-полями и `updated_at`, а
+        пользователь — `status`/`feedback`/`feedback_reason`. Поэтому сравниваем
+        метку user_state НЕ с общим `updated_at` (крон мог сдвинуть его через
+        минуту после лайка, и лайк бы потерялся), а с отдельной
+        `user_state_applied_at`, которую двигаем только мы.
+
+        `feedback_processed` сюда не входит: им владеет learner, и затирать его
+        при каждом merge нельзя.
         Возвращает число применённых изменений.
         """
         applied = 0
@@ -424,11 +439,12 @@ class Storage:
             if not item:
                 continue
             us_ts = _parse_iso(us.get("updated_at"))
-            it_ts = _parse_iso(item.get("updated_at"))
-            if us_ts and it_ts and us_ts < it_ts:
+            applied_ts = _parse_iso(item.get("user_state_applied_at"))
+            if us_ts and applied_ts and us_ts <= applied_ts:
                 continue
 
             changed = False
+            feedback_changed = False
             status = us.get("status")
             if status in VALID_STATUSES and item.get("status") != status:
                 item["status"] = status
@@ -437,17 +453,17 @@ class Storage:
             if feedback in VALID_FEEDBACK and item.get("feedback") != feedback:
                 item["feedback"] = feedback
                 changed = True
+                feedback_changed = True
             if "feedback_reason" in us and item.get("feedback_reason") != us.get("feedback_reason"):
                 item["feedback_reason"] = us.get("feedback_reason")
                 changed = True
-            if "feedback_processed" in us and bool(item.get("feedback_processed")) != bool(
-                us.get("feedback_processed")
-            ):
-                item["feedback_processed"] = bool(us.get("feedback_processed"))
-                changed = True
+                feedback_changed = True
 
             if changed:
-                item["updated_at"] = us.get("updated_at") or now_iso()
+                # Новая реакция ещё не учтена в профиле — learner должен её увидеть.
+                if feedback_changed:
+                    item["feedback_processed"] = False
+                item["user_state_applied_at"] = us.get("updated_at") or now_iso()
                 self._dirty_feed = True
                 applied += 1
 
@@ -649,7 +665,7 @@ class Storage:
 
     def _build_row(self, item: IngestItem, now: str) -> dict[str, Any]:
         src = self.source_by_identifier(item.source_identifier) or {}
-        keep = CONTENT_KEEP_PENDING if item.status == "pending_ai" else CONTENT_KEEP
+        keep = CONTENT_KEEP_PENDING if item.status == "pending_ai" else 0
         return {
             "id": make_item_id(item.url),
             "kind": item.kind or src.get("kind") or "news",
@@ -681,6 +697,10 @@ class Storage:
             "feedback": "none",
             "feedback_reason": None,
             "feedback_processed": False,
+            # Когда к строке последний раз применяли действия пользователя.
+            # Отдельная метка, чтобы гонка с пайплайном (он владеет updated_at)
+            # не «съедала» лайк/статус. Сравнивать только с ней, не с updated_at.
+            "user_state_applied_at": None,
             "published_at": item.published_at,
             "fetched_at": now,
             "updated_at": now,
@@ -774,11 +794,16 @@ class Storage:
         """Чистит старый мусор по fetched_at с раздельными лимитами для news и repos.
 
         Используем fetched_at (а не published_at), чтобы исторические посты из
-        разбора архива не удалялись в момент загрузки; `saved` не удаляются никогда.
+        разбора архива не удалялись в момент загрузки.
+        Не удаляются никогда: `saved` и лайкнутые (`feedback == "like"`) — второе
+        нужно, чтобы подборка «👍 Понравилось» в архиве не пустела через месяц.
         """
         now = datetime.now(timezone.utc)
         rejected_cutoff = now - timedelta(days=REJECTED_TTL_DAYS)
         archived_cutoff = now - timedelta(days=ARCHIVED_TTL_DAYS)
+
+        def _protected(it: dict[str, Any]) -> bool:
+            return it.get("status") == "saved" or it.get("feedback") == "like"
 
         removed = {"rejected": 0, "archived": 0, "overflow": 0}
         by_kind: dict[str, list[dict[str, Any]]] = {}
@@ -788,7 +813,7 @@ class Storage:
             ts = _parse_iso(it.get("fetched_at")) or _parse_iso(it.get("published_at"))
             kind = it.get("kind") or "news"
 
-            if status == "saved":
+            if _protected(it):
                 by_kind.setdefault(kind, []).append(it)
                 continue
             if status == "rejected" and ts and ts < rejected_cutoff:
@@ -806,12 +831,12 @@ class Storage:
             if len(items_of_kind) <= FEED_MAX_ITEMS:
                 kept.extend(items_of_kind)
                 continue
-            saved = [it for it in items_of_kind if it.get("status") == "saved"]
-            others = [it for it in items_of_kind if it.get("status") != "saved"]
+            protected = [it for it in items_of_kind if _protected(it)]
+            others = [it for it in items_of_kind if not _protected(it)]
             others.sort(key=lambda r: r.get("fetched_at") or r.get("published_at") or "", reverse=True)
-            allowed = max(FEED_MAX_ITEMS - len(saved), 0)
+            allowed = max(FEED_MAX_ITEMS - len(protected), 0)
             removed["overflow"] += max(len(others) - allowed, 0)
-            kept.extend(saved + others[:allowed])
+            kept.extend(protected + others[:allowed])
 
         total_removed = sum(removed.values())
         if total_removed:
@@ -834,7 +859,7 @@ class Storage:
             _atomic_write(self.dir / CONFIG_FILE, self.config)
             self._dirty_config = False
         if self._dirty_feed:
-            _atomic_write(self.dir / FEED_FILE, self.feed)
+            _atomic_write(self.dir / FEED_FILE, self.feed, compact=True)
             self._dirty_feed = False
         if self._dirty_user_state:
             self.user_state["updated_at"] = now_iso()

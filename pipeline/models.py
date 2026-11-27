@@ -68,7 +68,9 @@ class SettingsBundle(BaseModel):
     min_inbox_score: float = 6.5
     min_repos_score: float = 6.5
     telegram_alert_score: float = 9.0
-    learn_feedback_threshold: int = 10
+    # Порог для старта низкий: иначе первый профиль не соберётся неделями.
+    # Дальше learner сам поднимает планку до LEARN_THRESHOLD_STEADY.
+    learn_feedback_threshold: int = 5
     youtube_deep_summary_enabled: bool = True
     youtube_deep_summary_min_score: float = 7.5
 
@@ -105,7 +107,7 @@ class Bootstrap(BaseModel):
             min_inbox_score=_f("min_inbox_score", 6.5),
             min_repos_score=_f("min_repos_score", 6.5),
             telegram_alert_score=_f("telegram_alert_score", 9.0),
-            learn_feedback_threshold=int(_f("learn_feedback_threshold", 10)),
+            learn_feedback_threshold=int(_f("learn_feedback_threshold", 5)),
             youtube_deep_summary_enabled=_b("youtube_deep_summary_enabled", True),
             youtube_deep_summary_min_score=_f("youtube_deep_summary_min_score", 7.5),
         )

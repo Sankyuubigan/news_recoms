@@ -9,6 +9,7 @@ import type {
   BackfillConfig,
   ContentKind,
   DataConfig,
+  FeedbackFilter,
   FeedItem,
   FeedResponse,
   ItemStatus,
@@ -22,6 +23,7 @@ export type {
   BackfillConfig,
   ContentKind,
   DataConfig,
+  FeedbackFilter,
   FeedItem,
   FeedResponse,
   ItemStatus,
@@ -42,6 +44,7 @@ export const api = {
     sort: "score" | "date";
     category?: string;
     q?: string;
+    feedback?: FeedbackFilter;
     limit?: number;
     offset?: number;
   }): Promise<FeedResponse> {
@@ -55,6 +58,7 @@ export const api = {
     kind?: ContentKind | "all";
     category?: string;
     q?: string;
+    feedback?: FeedbackFilter;
   }): Promise<string[]> {
     await store.load();
     return store.getFeedIds(params);

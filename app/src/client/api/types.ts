@@ -2,6 +2,8 @@
 
 export type ItemStatus = "pending_ai" | "inbox" | "saved" | "archived" | "rejected";
 export type FeedbackValue = "none" | "like" | "dislike";
+/** Фильтр по реакции для вкладки «Архив». */
+export type FeedbackFilter = "all" | "like" | "dislike";
 export type SourceType = "telegram" | "rss" | "youtube";
 export type ContentType = "telegram" | "article" | "youtube";
 export type ContentKind = "news" | "repos";
@@ -54,6 +56,11 @@ export interface FeedItem {
   published_at: string;
   fetched_at: string;
   updated_at: string;
+  /**
+   * Когда к строке последний раз применяли действия пользователя (пишет пайплайн).
+   * Отдельная метка, чтобы `updated_at` от крона не «съедал» лайк/статус.
+   */
+  user_state_applied_at?: string | null;
 }
 
 /** Только действия пользователя — то, что пишет фронтенд. */

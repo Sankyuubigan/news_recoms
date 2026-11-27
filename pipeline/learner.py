@@ -9,6 +9,32 @@ from storage import Storage
 
 log = logging.getLogger(__name__)
 
+# Адаптивный порог. Пока профиль — дефолтная заглушка, ждём мало реакций, чтобы
+# обучение вообще началось в первые дни. После первого реального обновления
+# планка выше: каждое следующее обновление должно опираться на заметную выборку,
+# иначе профиль будет дёргаться от одного случайного лайка.
+LEARN_THRESHOLD_COLD = 5
+LEARN_THRESHOLD_STEADY = 8
+
+# Начала дефолтных профилей из storage.DEFAULT_SETTINGS: по ним определяем,
+# что обучение ещё ни разу не происходило.
+_PROFILE_STUBS = (
+    "Пока недостаточно реакций пользователя для формирования",
+    "Пока недостаточно реакций пользователя по репозиториям",
+)
+
+
+def _is_stub_profile(profile: str) -> bool:
+    text = (profile or "").strip()
+    return not text or any(text.startswith(stub) for stub in _PROFILE_STUBS)
+
+
+def _effective_threshold(configured: int, learned_profile: str) -> int:
+    """Холодный старт — мягче настройки, устоявшийся режим — не ниже неё."""
+    if _is_stub_profile(learned_profile):
+        return max(1, min(configured, LEARN_THRESHOLD_COLD))
+    return max(configured, LEARN_THRESHOLD_STEADY)
+
 
 def _learn_for_kind(
     storage: Storage,
@@ -18,9 +44,16 @@ def _learn_for_kind(
     learned_profile: str,
     threshold: int,
 ) -> bool:
+    effective = _effective_threshold(threshold, learned_profile)
     feedback = storage.unprocessed_feedback(kind=kind)
-    if len(feedback) < max(1, threshold):
-        log.info("learner[%s]: skipped (%d feedback, threshold %d)", kind, len(feedback), threshold)
+    if len(feedback) < effective:
+        log.info(
+            "learner[%s]: skipped (%d feedback, threshold %d, %s)",
+            kind,
+            len(feedback),
+            effective,
+            "cold start" if _is_stub_profile(learned_profile) else "steady",
+        )
         return False
 
     likes = [f for f in feedback if f.get("feedback") == "like"]

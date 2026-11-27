@@ -17,6 +17,7 @@ import {
 import type {
   ContentKind,
   DataConfig,
+  FeedbackFilter,
   FeedItem,
   FeedResponse,
   ItemStatus,
@@ -247,7 +248,11 @@ class FeedStore {
     return this.feed.map((item) => {
       const us = this.userState.items[item.id];
       if (!us) return item;
-      if (us.updated_at && item.updated_at && us.updated_at < item.updated_at) return item;
+      // Сравниваем не с updated_at (его двигает пайплайн при каждом прогоне),
+      // а с отдельной меткой «когда сюда последний раз применяли user_state».
+      // Иначе крон, обновивший пост через минуту после лайка, затирал бы лайк.
+      const applied = item.user_state_applied_at ?? null;
+      if (us.updated_at && applied && us.updated_at <= applied) return item;
       return {
         ...item,
         status: us.status ?? item.status,
@@ -269,6 +274,7 @@ class FeedStore {
     sort?: "score" | "date";
     category?: string;
     q?: string;
+    feedback?: FeedbackFilter;
   }): FeedItem[] {
     let filtered = this.getMerged().filter(
       (it) => it.status !== "pending_ai" && it.status === params.status,
@@ -276,6 +282,11 @@ class FeedStore {
 
     if (params.kind && params.kind !== "all") {
       filtered = filtered.filter((it) => itemKind(it) === params.kind);
+    }
+
+    // Фильтр по реакции — для вкладки «Архив»: 👍 Понравилось / 👎 Скрытые.
+    if (params.feedback && params.feedback !== "all") {
+      filtered = filtered.filter((it) => it.feedback === params.feedback);
     }
 
     if (params.category && params.category !== "Все") {
@@ -310,6 +321,7 @@ class FeedStore {
     sort: "score" | "date";
     category?: string;
     q?: string;
+    feedback?: FeedbackFilter;
     limit?: number;
     offset?: number;
   }): FeedResponse {
@@ -341,6 +353,9 @@ class FeedStore {
             (it) =>
               it.status === params.status &&
               (!params.kind || params.kind === "all" || itemKind(it) === params.kind) &&
+              (!params.feedback ||
+                params.feedback === "all" ||
+                it.feedback === params.feedback) &&
               it.category &&
               it.category !== "Общее",
           )
@@ -361,7 +376,13 @@ class FeedStore {
   }
 
   /** ID ВСЕХ постов вкладки с учётом фильтров — для кнопки «Всё просмотрено». */
-  getFeedIds(params: { status: string; kind?: ContentKind | "all"; category?: string; q?: string }): string[] {
+  getFeedIds(params: {
+    status: string;
+    kind?: ContentKind | "all";
+    category?: string;
+    q?: string;
+    feedback?: FeedbackFilter;
+  }): string[] {
     return this.filtered(params).map((it) => it.id);
   }
 
